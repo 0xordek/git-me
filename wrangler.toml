@@ -1,0 +1,14 @@
+name = "git-me"
+main = "build/git-me.wasm"
+compatibility_date = "2025-01-01"
+
+[[r2_buckets]]
+binding = "GITME_R2"
+bucket_name = "git-me-objects"
+
+[[kv_namespaces]]
+binding = "GITME_KV"
+id = "placeholder-kv-id"
+
+[vars]
+GITME_AUTH_TOKEN = ""

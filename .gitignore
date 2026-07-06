@@ -1,0 +1,24 @@
+# Build output
+/build/
+/dist/
+*.wasm
+
+# Dependencies
+/vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Superpowers
+
+
+
+# Cloudflare
+.wrangler/
