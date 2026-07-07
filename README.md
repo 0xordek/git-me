@@ -2,14 +2,12 @@
 
 A small self-hosted Git LFS utility for Cloudflare Workers, R2, and KV.
 
-Built with TinyGo for the Go protocol core and a Cloudflare Worker module for deployment.
+Built as a TypeScript Cloudflare Worker.
 
 ## Requirements
 
-- Go 1.22+
-- TinyGo 0.32+
 - Node.js 20+
-- Wrangler CLI
+- Wrangler CLI or project-local `wrangler`
 - Cloudflare account with Workers, R2, and KV enabled
 
 ## Quick Start
@@ -17,10 +15,10 @@ Built with TinyGo for the Go protocol core and a Cloudflare Worker module for de
 ```bash
 git clone git@github.com:0xordek/git-me.git
 cd git-me
-go test -v -race -count=1 ./...
-go vet ./...
+npm ci
 npm test
-make build
+npm run typecheck
+npm run deploy:dry
 ```
 
 ## Cloudflare Setup
@@ -43,8 +41,8 @@ wrangler secret put GITME_AUTH_TOKEN
 Deploy:
 
 ```bash
-wrangler deploy --dry-run
-wrangler deploy
+npm run deploy:dry
+npm run deploy
 ```
 
 ## Git LFS Client Setup
@@ -73,15 +71,15 @@ Batch requests and error responses use `application/vnd.git-lfs+json`.
 ## Storage Layout
 
 - R2 object key: `objects/<oid>`
+- Temporary upload key prefix: `objects/.tmp/`
 - KV metadata key: `object:<oid>`
 
 ## Development
 
 ```bash
-go test -v -race -count=1 ./...
-go vet ./...
+npm ci
 npm test
-make build
+npm run typecheck
 wrangler dev
 ```
 

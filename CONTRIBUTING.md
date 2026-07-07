@@ -7,17 +7,17 @@
 ```bash
 git clone git@github.com:0xordek/git-me.git
 cd git-me
-go test -v -race -count=1 ./...
-go vet ./...
+npm ci
 npm test
-make build
+npm run typecheck
+npm run deploy:dry
 ```
 
 ## Guidelines
 
 - Prefer small PRs.
-- Keep core Go code dependency-free.
-- Keep Cloudflare runtime code in `src/worker.js`.
+- Keep Cloudflare runtime code in `src/worker.ts`.
+- Keep behavior covered by tests in `test/worker.test.ts`.
 - Never commit secrets. Use `wrangler secret put GITME_AUTH_TOKEN`.
 - Add or update tests for behavior changes.
 
@@ -26,8 +26,7 @@ make build
 Run:
 
 ```bash
-go test -v -race -count=1 ./...
-go vet ./...
 npm test
-make build
+npm run typecheck
+npm run deploy:dry
 ```
