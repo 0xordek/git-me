@@ -123,7 +123,9 @@ function isLfsContentType(contentType) {
 }
 
 function selectTransfer(transfers) {
-  if (!Array.isArray(transfers) || transfers.length === 0) return 'basic';
+  if (transfers == null) return 'basic';
+  if (!Array.isArray(transfers)) return '';
+  if (transfers.length === 0) return 'basic';
   return transfers.includes('basic') ? 'basic' : '';
 }
 

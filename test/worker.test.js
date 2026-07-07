@@ -73,6 +73,19 @@ test('batch upload returns upload action', async () => {
   assert.equal(body.objects[0].actions.upload.href, '/objects/' + oid);
 });
 
+test('batch rejects non-array transfers', async () => {
+  const e = env();
+  const req = new Request('https://example.com/objects/batch', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/vnd.git-lfs+json' }),
+    body: JSON.stringify({ operation: 'upload', transfers: 'basic', objects: [{ oid, size: 1 }] }),
+  });
+
+  const res = await worker.fetch(req, e);
+
+  assert.equal(res.status, 400);
+});
+
 test('upload writes R2 object and KV metadata', async () => {
   const e = env();
   const content = 'hello lfs';
