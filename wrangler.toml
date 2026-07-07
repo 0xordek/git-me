@@ -9,6 +9,7 @@ bucket_name = "git-me-objects"
 
 [[kv_namespaces]]
 binding = "GITME_KV"
+id = "<kv_namespace_id>"
 
 [build]
 command = "make build"
