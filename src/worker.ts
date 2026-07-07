@@ -35,7 +35,7 @@ type DigestResult = {
 };
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     try {
       if (!env.GITME_AUTH_TOKEN) {
         return lfsError(500, 'configuration error');
