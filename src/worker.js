@@ -58,8 +58,9 @@ async function handleBatch(request, env) {
 
   const objects = [];
   for (const obj of body.objects) {
+    const href = new URL(`/objects/${obj.oid}`, request.url).href;
     if (body.operation === 'upload') {
-      objects.push({ oid: obj.oid, size: obj.size, actions: { upload: { href: `/objects/${obj.oid}` } } });
+      objects.push({ oid: obj.oid, size: obj.size, actions: { upload: { href } } });
       continue;
     }
 
@@ -74,7 +75,7 @@ async function handleBatch(request, env) {
       objects.push(objectNotFound(obj));
       continue;
     }
-    objects.push({ oid: obj.oid, size: meta.size, actions: { download: { href: `/objects/${obj.oid}` } } });
+    objects.push({ oid: obj.oid, size: meta.size, actions: { download: { href } } });
   }
 
   return json(200, { transfer, objects });

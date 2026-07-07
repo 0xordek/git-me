@@ -54,7 +54,7 @@ git lfs track "*.psd" "*.zip" "*.bin"
 git add .gitattributes
 
 git config lfs.url https://your-worker.workers.dev
-git config lfs.http.https://your-worker.workers.dev.extraheader "Authorization: Bearer <token>"
+git config http.https://your-worker.workers.dev.extraheader "Authorization: Bearer <token>"
 git config lfs.http.https://your-worker.workers.dev.locksverify false
 ```
 

@@ -70,7 +70,24 @@ test('batch upload returns upload action', async () => {
 
   assert.equal(res.status, 200);
   assert.equal(body.transfer, 'basic');
-  assert.equal(body.objects[0].actions.upload.href, '/objects/' + oid);
+  assert.equal(body.objects[0].actions.upload.href, 'https://example.com/objects/' + oid);
+});
+
+test('batch download returns absolute download action href', async () => {
+  const e = env();
+  await e.GITME_R2.put('objects/' + oid, 'x');
+  await e.GITME_KV.put('object:' + oid, JSON.stringify({ oid, size: 1, created_at: new Date().toISOString(), uploaded: true }));
+  const req = new Request('https://example.com/objects/batch', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/vnd.git-lfs+json' }),
+    body: JSON.stringify({ operation: 'download', transfers: ['basic'], objects: [{ oid, size: 1 }] }),
+  });
+
+  const res = await worker.fetch(req, e);
+  const body = await res.json();
+
+  assert.equal(res.status, 200);
+  assert.equal(body.objects[0].actions.download.href, 'https://example.com/objects/' + oid);
 });
 
 test('batch rejects non-array transfers', async () => {
