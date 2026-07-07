@@ -173,6 +173,21 @@ func TestUploadHandlerUnauthorized(t *testing.T) {
 	}
 }
 
+func TestUploadHandlerMethodNotAllowed(t *testing.T) {
+	objStore, metaStore := setupTestStores()
+	handler := UploadHandler(objStore, metaStore, auth.NewBearerToken("tok"))
+	oid := "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+	req := httptest.NewRequest(http.MethodGet, "/objects/"+oid, nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
+}
+
 func TestUploadHandlerMissingOID(t *testing.T) {
 	objStore, metaStore := setupTestStores()
 	handler := UploadHandler(objStore, metaStore, auth.NewBearerToken("tok"))
@@ -231,6 +246,21 @@ func TestDownloadHandlerMissingOID(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestDownloadHandlerMethodNotAllowed(t *testing.T) {
+	objStore, metaStore := setupTestStores()
+	handler := DownloadHandler(objStore, metaStore, auth.NewBearerToken("tok"))
+	oid := "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+	req := httptest.NewRequest(http.MethodPut, "/objects/"+oid, nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
 	}
 }
 
