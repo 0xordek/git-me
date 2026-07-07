@@ -3,8 +3,39 @@ const OBJECT_PREFIX = 'objects/';
 const META_PREFIX = 'object:';
 const OID_RE = /^[0-9a-fA-F]{64}$/;
 
+export interface Env {
+  GITME_AUTH_TOKEN: string;
+  GITME_R2: R2Bucket;
+  GITME_KV: KVNamespace;
+}
+
+type LfsOperation = 'upload' | 'download';
+
+type LfsBatchObject = {
+  oid: string;
+  size: number;
+};
+
+type LfsBatchRequest = {
+  operation?: string;
+  transfers?: unknown;
+  objects?: unknown;
+};
+
+type ObjectMeta = {
+  oid: string;
+  size: number;
+  created_at: string;
+  uploaded: true;
+};
+
+type DigestResult = {
+  hex: string;
+  size: number;
+};
+
 export default {
-  async fetch(request, env) {
+  async fetch(request: Request, env: Env): Promise<Response> {
     try {
       if (!env.GITME_AUTH_TOKEN) {
         return lfsError(500, 'configuration error');
@@ -21,67 +52,69 @@ export default {
       if (url.pathname.startsWith('/objects/')) {
         const oid = url.pathname.slice('/objects/'.length);
         if (request.method === 'PUT') return handleUpload(request, env, oid);
-        if (request.method === 'GET') return handleDownload(request, env, oid);
+        if (request.method === 'GET') return handleDownload(env, oid);
         return lfsError(405, 'method not allowed');
       }
       return new Response('not found\n', { status: 404 });
-    } catch (err) {
+    } catch {
       return lfsError(500, 'internal server error');
     }
   },
-};
+} satisfies ExportedHandler<Env>;
 
-async function handleBatch(request, env) {
+async function handleBatch(request: Request, env: Env): Promise<Response> {
   if (request.method !== 'POST') return lfsError(405, 'method not allowed');
   if (!isLfsContentType(request.headers.get('Content-Type'))) {
     return lfsError(415, 'content type must be ' + LFS_CONTENT_TYPE);
   }
 
-  let body;
+  let body: LfsBatchRequest;
   try {
-    body = await request.json();
+    body = (await request.json()) as LfsBatchRequest;
   } catch {
     return lfsError(400, 'invalid JSON');
   }
 
   const transfer = selectTransfer(body.transfers);
   if (!transfer) return lfsError(400, 'unsupported transfer adapter');
-  if (body.operation !== 'upload' && body.operation !== 'download') {
+  if (!isLfsOperation(body.operation)) {
     return lfsError(400, 'lfs: unknown batch operation: ' + body.operation);
   }
   if (!Array.isArray(body.objects)) return lfsError(400, 'objects must be an array');
 
+  const objects: LfsBatchObject[] = [];
   for (const obj of body.objects) {
     const validation = validateObject(obj);
     if (validation) return lfsError(400, validation);
+    objects.push(obj as LfsBatchObject);
   }
 
-  const objects = [];
-  for (const obj of body.objects) {
+  const responseObjects = [];
+  for (const obj of objects) {
     const href = new URL(`/objects/${obj.oid}`, request.url).href;
     if (body.operation === 'upload') {
-      objects.push({ oid: obj.oid, size: obj.size, actions: { upload: { href } } });
+      responseObjects.push({ oid: obj.oid, size: obj.size, actions: { upload: { href } } });
       continue;
     }
 
     const metaText = await env.GITME_KV.get(META_PREFIX + obj.oid);
     if (!metaText) {
-      objects.push(objectNotFound(obj));
+      responseObjects.push(objectNotFound(obj));
       continue;
     }
-    const meta = JSON.parse(metaText);
+    const meta = JSON.parse(metaText) as ObjectMeta;
     const head = await env.GITME_R2.head(OBJECT_PREFIX + obj.oid);
     if (!meta.uploaded || !head) {
-      objects.push(objectNotFound(obj));
+      responseObjects.push(objectNotFound(obj));
       continue;
     }
-    objects.push({ oid: obj.oid, size: meta.size, actions: { download: { href } } });
+    responseObjects.push({ oid: obj.oid, size: meta.size, actions: { download: { href } } });
   }
 
-  return json(200, { transfer, objects });
+  return json(200, { transfer, objects: responseObjects });
 }
 
-async function handleUpload(request, env, oid) {
+async function handleUpload(request: Request, env: Env, oid: string): Promise<Response> {
   if (!OID_RE.test(oid)) return lfsError(400, 'invalid oid');
   if (!request.body) return lfsError(400, 'missing request body');
 
@@ -98,19 +131,20 @@ async function handleUpload(request, env, oid) {
   }
 
   const tempObject = await env.GITME_R2.get(tempKey);
+  if (!tempObject?.body) return lfsError(500, 'internal server error');
   await env.GITME_R2.put(objectKey, tempObject.body);
   await env.GITME_R2.delete(tempKey);
 
-  const meta = { oid, size: digest.size, created_at: new Date().toISOString(), uploaded: true };
+  const meta: ObjectMeta = { oid, size: digest.size, created_at: new Date().toISOString(), uploaded: true };
   await env.GITME_KV.put(META_PREFIX + oid, JSON.stringify(meta));
   return new Response(null, { status: 200 });
 }
 
-async function handleDownload(request, env, oid) {
+async function handleDownload(env: Env, oid: string): Promise<Response> {
   if (!OID_RE.test(oid)) return lfsError(400, 'invalid oid');
   const metaText = await env.GITME_KV.get(META_PREFIX + oid);
   if (!metaText) return lfsError(404, 'object not found');
-  const meta = JSON.parse(metaText);
+  const meta = JSON.parse(metaText) as ObjectMeta;
   if (!meta.uploaded) return lfsError(404, 'object not found');
 
   const object = await env.GITME_R2.get(OBJECT_PREFIX + oid);
@@ -125,46 +159,54 @@ async function handleDownload(request, env, oid) {
   });
 }
 
-function isLfsContentType(contentType) {
+function isLfsOperation(operation: unknown): operation is LfsOperation {
+  return operation === 'upload' || operation === 'download';
+}
+
+function isLfsContentType(contentType: string | null): boolean {
   return (contentType || '').split(';', 1)[0].trim().toLowerCase() === LFS_CONTENT_TYPE;
 }
 
-function selectTransfer(transfers) {
+function selectTransfer(transfers: unknown): string {
   if (transfers == null) return 'basic';
   if (!Array.isArray(transfers)) return '';
   if (transfers.length === 0) return 'basic';
   return transfers.includes('basic') ? 'basic' : '';
 }
 
-function validateObject(obj) {
-  if (!obj || !OID_RE.test(obj.oid || '')) return 'invalid oid';
+function validateObject(obj: unknown): string {
+  if (!isObjectRecord(obj) || !OID_RE.test(String(obj.oid || ''))) return 'invalid oid';
   if (!Number.isInteger(obj.size) || obj.size < 0) return 'object size must not be negative';
   return '';
 }
 
-function objectNotFound(obj) {
+function isObjectRecord(value: unknown): value is LfsBatchObject {
+  return typeof value === 'object' && value !== null && 'oid' in value && 'size' in value;
+}
+
+function objectNotFound(obj: LfsBatchObject): object {
   return { oid: obj.oid, size: obj.size, error: { code: 404, message: 'object not found' } };
 }
 
-function json(status, body) {
+function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body) + '\n', { status, headers: { 'Content-Type': LFS_CONTENT_TYPE } });
 }
 
-function lfsError(status, message) {
+function lfsError(status: number, message: string): Response {
   return json(status, { message });
 }
 
-async function digestAndCount(stream) {
+async function digestAndCount(stream: ReadableStream<Uint8Array>): Promise<DigestResult> {
   if (typeof DigestStream === 'function') {
     let size = 0;
-    const counter = new TransformStream({
+    const counter = new TransformStream<Uint8Array, Uint8Array>({
       transform(chunk, controller) {
         size += chunk.byteLength;
         controller.enqueue(chunk);
       },
     });
     const digester = new DigestStream('SHA-256');
-    await stream.pipeThrough(counter).pipeTo(digester.writable);
+    await stream.pipeThrough(counter).pipeTo(digester);
     const digest = await digester.digest;
     return { hex: bytesToHex(new Uint8Array(digest)), size };
   }
@@ -174,6 +216,6 @@ async function digestAndCount(stream) {
   return { hex: bytesToHex(new Uint8Array(digest)), size: buffer.byteLength };
 }
 
-function bytesToHex(bytes) {
+function bytesToHex(bytes: Uint8Array): string {
   return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
 }

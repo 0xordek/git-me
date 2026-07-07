@@ -1,7 +1,15 @@
 {
   "type": "module",
   "scripts": {
-    "test": "node --test"
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "deploy:dry": "wrangler deploy --dry-run",
+    "deploy": "wrangler deploy"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260702.1",
+    "typescript": "^6.0.3",
+    "vitest": "^3.2.7",
+    "wrangler": "^4.107.1"
+  }
 }
