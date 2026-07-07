@@ -56,7 +56,14 @@ func handleBatchDownload(ctx context.Context, req *BatchRequest, transfer string
 	objects := make([]TransferObject, len(req.Objects))
 	for i, obj := range req.Objects {
 		meta, err := metaStore.Get(ctx, obj.OID)
-		if err != nil || !meta.Uploaded {
+		if errors.Is(err, metadata.ErrNotFound) {
+			objects[i] = objectNotFound(obj)
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !meta.Uploaded {
 			objects[i] = objectNotFound(obj)
 			continue
 		}

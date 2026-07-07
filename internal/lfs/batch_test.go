@@ -15,6 +15,10 @@ type existsErrorStore struct {
 	err error
 }
 
+type metadataGetErrorStore struct {
+	err error
+}
+
 func (s existsErrorStore) Put(ctx context.Context, oid string, reader io.Reader) error {
 	return nil
 }
@@ -25,6 +29,14 @@ func (s existsErrorStore) Get(ctx context.Context, oid string) (io.ReadCloser, e
 
 func (s existsErrorStore) Exists(ctx context.Context, oid string) (bool, error) {
 	return false, s.err
+}
+
+func (s metadataGetErrorStore) Get(ctx context.Context, oid string) (*metadata.ObjectMeta, error) {
+	return nil, s.err
+}
+
+func (s metadataGetErrorStore) Put(ctx context.Context, meta *metadata.ObjectMeta) error {
+	return nil
 }
 
 func TestHandleBatchUpload(t *testing.T) {
@@ -235,6 +247,21 @@ func TestHandleBatchDownloadPropagatesObjectExistsError(t *testing.T) {
 	}
 	if !errors.Is(err, existsErr) {
 		t.Fatalf("HandleBatch() error = %v, want %v", err, existsErr)
+	}
+}
+
+func TestHandleBatchDownloadPropagatesMetadataGetError(t *testing.T) {
+	ctx := context.Background()
+	objStore := storage.NewInMemoryStore()
+	oid := "c3b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+	metaErr := errors.New("metadata unavailable")
+
+	_, err := HandleBatch(ctx, &BatchRequest{Operation: OperationDownload, Objects: []BatchObject{{OID: oid, Size: 12}}}, objStore, metadataGetErrorStore{err: metaErr})
+	if err == nil {
+		t.Fatal("expected HandleBatch to return metadata Get error")
+	}
+	if !errors.Is(err, metaErr) {
+		t.Fatalf("HandleBatch() error = %v, want %v", err, metaErr)
 	}
 }
 
