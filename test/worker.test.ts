@@ -221,6 +221,26 @@ describe('worker', () => {
     expect(JSON.parse((await e.GITME_KV.get('object:' + oid)) || '{}')).toEqual(meta);
   });
 
+  test('direct batch upload with uploaded metadata whose KV size mismatches R2 size returns object error even when request size matches R2', async () => {
+    const e = directEnv();
+    const meta = { oid, size: 2, created_at: '2026-01-02T03:04:05.000Z', uploaded: true };
+    await e.GITME_R2.put('objects/' + oid, 'x');
+    await e.GITME_KV.put('object:' + oid, JSON.stringify(meta));
+    const req = new Request('https://example.com/objects/batch', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/vnd.git-lfs+json' }),
+      body: JSON.stringify({ operation: 'upload', transfers: ['basic'], objects: [{ oid, size: 1 }] }),
+    });
+
+    const res = await worker.fetch(req, e, {} as ExecutionContext);
+    const body = await res.json() as { objects: Array<{ error: { code: number }; actions?: { upload?: unknown } }> };
+
+    expect(res.status).toBe(200);
+    expect(body.objects[0].error.code).toBe(404);
+    expect(body.objects[0].actions?.upload).toBeUndefined();
+    expect(JSON.parse((await e.GITME_KV.get('object:' + oid)) || '{}')).toEqual(meta);
+  });
+
   test('batch download returns absolute download action href', async () => {
     const e = env();
     await e.GITME_R2.put('objects/' + oid, 'x');

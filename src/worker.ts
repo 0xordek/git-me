@@ -116,7 +116,7 @@ async function handleBatch(request: Request, env: Env, config: AppConfig): Promi
         const existingMeta = existingMetaText ? JSON.parse(existingMetaText) as ObjectMeta : null;
         const existingHead = existingMeta?.uploaded ? await env.GITME_R2.head(OBJECT_PREFIX + obj.oid) : null;
         if (existingMeta?.uploaded) {
-          responseObjects.push(existingHead?.size === obj.size ? { oid: obj.oid, size: obj.size } : objectNotFound(obj));
+          responseObjects.push(existingHead?.size === existingMeta.size && existingMeta.size === obj.size ? { oid: obj.oid, size: obj.size } : objectNotFound(obj));
           continue;
         }
         const meta: ObjectMeta = { oid: obj.oid, size: obj.size, created_at: new Date().toISOString(), uploaded: false };
