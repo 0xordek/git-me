@@ -2,12 +2,30 @@ package lfs
 
 import (
 	"context"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 
 	"github.com/ordek1/git-me/internal/metadata"
 	"github.com/ordek1/git-me/internal/storage"
 )
+
+type existsErrorStore struct {
+	err error
+}
+
+func (s existsErrorStore) Put(ctx context.Context, oid string, reader io.Reader) error {
+	return nil
+}
+
+func (s existsErrorStore) Get(ctx context.Context, oid string) (io.ReadCloser, error) {
+	return nil, s.err
+}
+
+func (s existsErrorStore) Exists(ctx context.Context, oid string) (bool, error) {
+	return false, s.err
+}
 
 func TestHandleBatchUpload(t *testing.T) {
 	ctx := context.Background()
@@ -198,6 +216,25 @@ func TestHandleBatchDownloadMetadataExistsObjectMissing(t *testing.T) {
 	}
 	if obj.Actions != nil {
 		t.Fatalf("Actions = %v, want nil", obj.Actions)
+	}
+}
+
+func TestHandleBatchDownloadPropagatesObjectExistsError(t *testing.T) {
+	ctx := context.Background()
+	metaStore := metadata.NewInMemoryStore()
+	oid := "c2b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+	existsErr := errors.New("exists unavailable")
+
+	if err := metaStore.Put(ctx, &metadata.ObjectMeta{OID: oid, Size: 12, Uploaded: true}); err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+
+	_, err := HandleBatch(ctx, &BatchRequest{Operation: OperationDownload, Objects: []BatchObject{{OID: oid, Size: 12}}}, existsErrorStore{err: existsErr}, metaStore)
+	if err == nil {
+		t.Fatal("expected HandleBatch to return store.Exists error")
+	}
+	if !errors.Is(err, existsErr) {
+		t.Fatalf("HandleBatch() error = %v, want %v", err, existsErr)
 	}
 }
 

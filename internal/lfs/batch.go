@@ -30,7 +30,7 @@ func HandleBatch(
 	case OperationUpload:
 		return handleBatchUpload(req, transfer), nil
 	case OperationDownload:
-		return handleBatchDownload(ctx, req, transfer, store, metaStore), nil
+		return handleBatchDownload(ctx, req, transfer, store, metaStore)
 	default:
 		return nil, errors.New("lfs: unknown batch operation: " + req.Operation)
 	}
@@ -52,7 +52,7 @@ func handleBatchUpload(req *BatchRequest, transfer string) *BatchResponse {
 	return &BatchResponse{Transfer: transfer, Objects: objects}
 }
 
-func handleBatchDownload(ctx context.Context, req *BatchRequest, transfer string, store storage.ObjectStore, metaStore metadata.MetadataStore) *BatchResponse {
+func handleBatchDownload(ctx context.Context, req *BatchRequest, transfer string, store storage.ObjectStore, metaStore metadata.MetadataStore) (*BatchResponse, error) {
 	objects := make([]TransferObject, len(req.Objects))
 	for i, obj := range req.Objects {
 		meta, err := metaStore.Get(ctx, obj.OID)
@@ -62,7 +62,10 @@ func handleBatchDownload(ctx context.Context, req *BatchRequest, transfer string
 		}
 
 		exists, err := store.Exists(ctx, obj.OID)
-		if err != nil || !exists {
+		if err != nil {
+			return nil, err
+		}
+		if !exists {
 			objects[i] = objectNotFound(obj)
 			continue
 		}
@@ -77,7 +80,7 @@ func handleBatchDownload(ctx context.Context, req *BatchRequest, transfer string
 			},
 		}
 	}
-	return &BatchResponse{Transfer: transfer, Objects: objects}
+	return &BatchResponse{Transfer: transfer, Objects: objects}, nil
 }
 
 func objectNotFound(obj BatchObject) TransferObject {
