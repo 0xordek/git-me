@@ -37,6 +37,18 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadWhitespaceR2BucketRejected(t *testing.T) {
+	os.Setenv("GITME_AUTH_TOKEN", "tok")
+	os.Setenv("GITME_R2_BUCKET", "   ")
+	defer os.Unsetenv("GITME_AUTH_TOKEN")
+	defer os.Unsetenv("GITME_R2_BUCKET")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() expected error for whitespace-only R2 bucket")
+	}
+}
+
 func TestValidateMissingAuthToken(t *testing.T) {
 	cfg := &Config{AuthToken: "", R2Bucket: "b"}
 	err := cfg.Validate()

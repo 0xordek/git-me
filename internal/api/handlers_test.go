@@ -83,6 +83,36 @@ func TestBatchHandlerInvalidContentType(t *testing.T) {
 	}
 }
 
+func TestBatchHandlerAcceptsContentTypeWithCharset(t *testing.T) {
+	objStore, metaStore := setupTestStores()
+	handler := BatchHandler(objStore, metaStore, auth.NewBearerToken("tok"))
+	body := `{"operation":"upload","transfers":["basic"],"objects":[{"oid":"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2","size":1}]}`
+	req := httptest.NewRequest(http.MethodPost, "/objects/batch", strings.NewReader(body))
+	req.Header.Set("Content-Type", lfs.ContentType+"; charset=utf-8")
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}
+
+func TestBatchHandlerMethodNotAllowed(t *testing.T) {
+	objStore, metaStore := setupTestStores()
+	handler := BatchHandler(objStore, metaStore, auth.NewBearerToken("tok"))
+	req := httptest.NewRequest(http.MethodGet, "/objects/batch", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
+}
+
 func TestBatchHandlerInvalidJSON(t *testing.T) {
 	objStore, metaStore := setupTestStores()
 	authenticator := auth.NewBearerToken("tok")
@@ -143,6 +173,20 @@ func TestUploadHandlerUnauthorized(t *testing.T) {
 	}
 }
 
+func TestUploadHandlerMissingOID(t *testing.T) {
+	objStore, metaStore := setupTestStores()
+	handler := UploadHandler(objStore, metaStore, auth.NewBearerToken("tok"))
+	req := httptest.NewRequest(http.MethodPut, "/objects/", strings.NewReader("data"))
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
 func TestDownloadHandler(t *testing.T) {
 	objStore, metaStore := setupTestStores()
 	ctx := context.Background()
@@ -176,6 +220,39 @@ func TestDownloadHandler(t *testing.T) {
 	}
 }
 
+func TestDownloadHandlerMissingOID(t *testing.T) {
+	objStore, metaStore := setupTestStores()
+	handler := DownloadHandler(objStore, metaStore, auth.NewBearerToken("tok"))
+	req := httptest.NewRequest(http.MethodGet, "/objects/", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestDownloadHandlerSetsContentLength(t *testing.T) {
+	objStore, metaStore := setupTestStores()
+	ctx := context.Background()
+	oid := "b1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+	content := []byte("download content")
+	_ = metaStore.Put(ctx, &metadata.ObjectMeta{OID: oid, Size: int64(len(content)), Uploaded: true})
+	_ = objStore.Put(ctx, oid, bytes.NewReader(content))
+	handler := DownloadHandler(objStore, metaStore, auth.NewBearerToken("tok"))
+	req := httptest.NewRequest(http.MethodGet, "/objects/"+oid, nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Header().Get("Content-Length") != "16" {
+		t.Fatalf("Content-Length = %q, want 16", rec.Header().Get("Content-Length"))
+	}
+}
+
 func TestDownloadHandlerNotFound(t *testing.T) {
 	objStore, metaStore := setupTestStores()
 	authenticator := auth.NewBearerToken("tok")
@@ -189,5 +266,22 @@ func TestDownloadHandlerNotFound(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestUnauthorizedResponseUsesLFSContentType(t *testing.T) {
+	objStore, metaStore := setupTestStores()
+	handler := BatchHandler(objStore, metaStore, auth.NewBearerToken("tok"))
+	req := httptest.NewRequest(http.MethodPost, "/objects/batch", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", lfs.ContentType)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	if rec.Header().Get("Content-Type") != lfs.ContentType {
+		t.Fatalf("Content-Type = %q, want %q", rec.Header().Get("Content-Type"), lfs.ContentType)
 	}
 }

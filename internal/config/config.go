@@ -40,5 +40,5 @@ func stringOrDefault(val, defaultVal string) string {
 	if val == "" {
 		return defaultVal
 	}
-	return val
+	return strings.TrimSpace(val)
 }

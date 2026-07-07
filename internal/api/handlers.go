@@ -24,7 +24,7 @@ func BatchHandler(
 			writeLfsError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		if r.Header.Get("Content-Type") != lfs.ContentType {
+		if !lfs.IsLFSContentType(r.Header.Get("Content-Type")) {
 			writeLfsError(w, http.StatusUnsupportedMediaType, "content type must be "+lfs.ContentType)
 			return
 		}
