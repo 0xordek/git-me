@@ -16,7 +16,7 @@ func TestHandleUpload(t *testing.T) {
 	objStore := storage.NewInMemoryStore()
 	metaStore := metadata.NewInMemoryStore()
 
-	oid := "upload-oid-1234567890abcdef1234567890abcdef1234567890abcdef1234"
+	oid := "d1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
 	content := []byte("test file content for upload")
 
 	err := HandleUpload(ctx, oid, bytes.NewReader(content), objStore, metaStore)
@@ -52,7 +52,7 @@ func TestHandleUploadCorrectContent(t *testing.T) {
 	objStore := storage.NewInMemoryStore()
 	metaStore := metadata.NewInMemoryStore()
 
-	oid := "content-oid-1234567890abcdef1234567890abcdef1234567890abcdef1234"
+	oid := "e1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
 	content := []byte("exact content verification test data")
 
 	HandleUpload(ctx, oid, bytes.NewReader(content), objStore, metaStore)
@@ -74,7 +74,7 @@ func TestHandleUploadEmptyContent(t *testing.T) {
 	objStore := storage.NewInMemoryStore()
 	metaStore := metadata.NewInMemoryStore()
 
-	oid := "empty-oid-01234567890abcdef1234567890abcdef1234567890abcdef12345"
+	oid := "f1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
 	err := HandleUpload(ctx, oid, strings.NewReader(""), objStore, metaStore)
 	if err != nil {
 		t.Fatalf("HandleUpload() error = %v", err)
@@ -94,7 +94,7 @@ func TestHandleUploadOverwrite(t *testing.T) {
 	objStore := storage.NewInMemoryStore()
 	metaStore := metadata.NewInMemoryStore()
 
-	oid := "overwrite-upl-1234567890abcdef1234567890abcdef1234567890abcdef12"
+	oid := "a2b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
 	first := []byte("first version")
 	second := []byte("second version - completely different data")
 
@@ -120,7 +120,7 @@ func TestHandleUploadLargeContent(t *testing.T) {
 	objStore := storage.NewInMemoryStore()
 	metaStore := metadata.NewInMemoryStore()
 
-	oid := "large-upl-001234567890abcdef1234567890abcdef1234567890abcdef12345"
+	oid := "b2b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
 	largeData := bytes.Repeat([]byte("A"), 5*1024*1024) // 5 MB
 
 	err := HandleUpload(ctx, oid, bytes.NewReader(largeData), objStore, metaStore)

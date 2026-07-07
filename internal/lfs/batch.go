@@ -17,17 +17,26 @@ func HandleBatch(
 	store storage.ObjectStore,
 	metaStore metadata.MetadataStore,
 ) (*BatchResponse, error) {
+	if err := ValidateBatchRequest(req); err != nil {
+		return nil, err
+	}
+
+	transfer, err := SelectTransfer(req.Transfers)
+	if err != nil {
+		return nil, err
+	}
+
 	switch req.Operation {
 	case OperationUpload:
-		return handleBatchUpload(req), nil
+		return handleBatchUpload(req, transfer), nil
 	case OperationDownload:
-		return handleBatchDownload(ctx, req, metaStore), nil
+		return handleBatchDownload(ctx, req, transfer, store, metaStore), nil
 	default:
 		return nil, errors.New("lfs: unknown batch operation: " + req.Operation)
 	}
 }
 
-func handleBatchUpload(req *BatchRequest) *BatchResponse {
+func handleBatchUpload(req *BatchRequest, transfer string) *BatchResponse {
 	objects := make([]TransferObject, len(req.Objects))
 	for i, obj := range req.Objects {
 		objects[i] = TransferObject{
@@ -40,24 +49,24 @@ func handleBatchUpload(req *BatchRequest) *BatchResponse {
 			},
 		}
 	}
-	return &BatchResponse{
-		Transfer: "basic",
-		Objects:  objects,
-	}
+	return &BatchResponse{Transfer: transfer, Objects: objects}
 }
 
-func handleBatchDownload(ctx context.Context, req *BatchRequest, metaStore metadata.MetadataStore) *BatchResponse {
+func handleBatchDownload(ctx context.Context, req *BatchRequest, transfer string, store storage.ObjectStore, metaStore metadata.MetadataStore) *BatchResponse {
 	objects := make([]TransferObject, len(req.Objects))
 	for i, obj := range req.Objects {
 		meta, err := metaStore.Get(ctx, obj.OID)
 		if err != nil || !meta.Uploaded {
-			objects[i] = TransferObject{
-				OID:   obj.OID,
-				Size:  obj.Size,
-				Error: &ObjectError{Code: 404, Message: "object not found"},
-			}
+			objects[i] = objectNotFound(obj)
 			continue
 		}
+
+		exists, err := store.Exists(ctx, obj.OID)
+		if err != nil || !exists {
+			objects[i] = objectNotFound(obj)
+			continue
+		}
+
 		objects[i] = TransferObject{
 			OID:  obj.OID,
 			Size: meta.Size,
@@ -68,8 +77,13 @@ func handleBatchDownload(ctx context.Context, req *BatchRequest, metaStore metad
 			},
 		}
 	}
-	return &BatchResponse{
-		Transfer: "basic",
-		Objects:  objects,
+	return &BatchResponse{Transfer: transfer, Objects: objects}
+}
+
+func objectNotFound(obj BatchObject) TransferObject {
+	return TransferObject{
+		OID:   obj.OID,
+		Size:  obj.Size,
+		Error: &ObjectError{Code: 404, Message: "object not found"},
 	}
 }

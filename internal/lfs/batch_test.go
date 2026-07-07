@@ -2,6 +2,7 @@ package lfs
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/ordek1/git-me/internal/metadata"
@@ -49,13 +50,16 @@ func TestHandleBatchDownload(t *testing.T) {
 	metaStore := metadata.NewInMemoryStore()
 	objStore := storage.NewInMemoryStore()
 
-	oid := "b1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2a"
+	oid := "b1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
 
 	metaStore.Put(ctx, &metadata.ObjectMeta{
 		OID:      oid,
 		Size:     512,
 		Uploaded: true,
 	})
+	if err := objStore.Put(ctx, oid, strings.NewReader("download data")); err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
 
 	req := &BatchRequest{
 		Operation: OperationDownload,
@@ -83,7 +87,7 @@ func TestHandleBatchDownloadNotFound(t *testing.T) {
 
 	req := &BatchRequest{
 		Operation: OperationDownload,
-		Objects:   []BatchObject{{OID: "nonexistent-oid-nx1234567890abcdef1234567890abcdef1234567890ab", Size: 1}},
+		Objects:   []BatchObject{{OID: "f1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", Size: 1}},
 	}
 
 	resp, err := HandleBatch(ctx, req, objStore, metaStore)
@@ -105,14 +109,17 @@ func TestHandleBatchMixedObjects(t *testing.T) {
 	metaStore := metadata.NewInMemoryStore()
 	objStore := storage.NewInMemoryStore()
 
-	existingOID := "mixed-existing-1234567890abcdef1234567890abcdef1234567890ab12"
+	existingOID := "d1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
 	metaStore.Put(ctx, &metadata.ObjectMeta{OID: existingOID, Size: 100, Uploaded: true})
+	if err := objStore.Put(ctx, existingOID, strings.NewReader("mixed data")); err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
 
 	req := &BatchRequest{
 		Operation: OperationDownload,
 		Objects: []BatchObject{
 			{OID: existingOID, Size: 100},
-			{OID: "mixed-missing1-1234567890abcdef1234567890abcdef1234567890ab12", Size: 200},
+			{OID: "e1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", Size: 200},
 		},
 	}
 
@@ -164,5 +171,47 @@ func TestHandleBatchEmptyObjects(t *testing.T) {
 	}
 	if len(resp.Objects) != 0 {
 		t.Errorf("len(Objects) = %d, want 0", len(resp.Objects))
+	}
+}
+
+func TestHandleBatchDownloadMetadataExistsObjectMissing(t *testing.T) {
+	ctx := context.Background()
+	metaStore := metadata.NewInMemoryStore()
+	objStore := storage.NewInMemoryStore()
+	oid := "c1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+
+	if err := metaStore.Put(ctx, &metadata.ObjectMeta{OID: oid, Size: 12, Uploaded: true}); err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+
+	resp, err := HandleBatch(ctx, &BatchRequest{Operation: OperationDownload, Objects: []BatchObject{{OID: oid, Size: 12}}}, objStore, metaStore)
+	if err != nil {
+		t.Fatalf("HandleBatch() error = %v", err)
+	}
+
+	obj := resp.Objects[0]
+	if obj.Error == nil {
+		t.Fatal("expected object error when metadata exists but object is missing")
+	}
+	if obj.Error.Code != 404 {
+		t.Fatalf("Error.Code = %d, want 404", obj.Error.Code)
+	}
+	if obj.Actions != nil {
+		t.Fatalf("Actions = %v, want nil", obj.Actions)
+	}
+}
+
+func TestHandleBatchRejectsUnsupportedTransfer(t *testing.T) {
+	ctx := context.Background()
+	metaStore := metadata.NewInMemoryStore()
+	objStore := storage.NewInMemoryStore()
+
+	_, err := HandleBatch(ctx, &BatchRequest{
+		Operation: OperationUpload,
+		Transfers: []string{"ssh"},
+		Objects:   []BatchObject{{OID: validOID, Size: 1}},
+	}, objStore, metaStore)
+	if err == nil {
+		t.Fatal("expected unsupported transfer error")
 	}
 }

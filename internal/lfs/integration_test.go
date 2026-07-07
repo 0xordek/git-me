@@ -20,9 +20,9 @@ func TestFullUploadDownloadFlow(t *testing.T) {
 		oid     string
 		content []byte
 	}{
-		{"endtoend-oid1-1234567890abcdef1234567890abcdef1234567890abcdef12", []byte("Hello from object 1")},
-		{"endtoend-oid2-1234567890abcdef1234567890abcdef1234567890abcdef12", bytes.Repeat([]byte("B"), 1024)},
-		{"endtoend-oid3-1234567890abcdef1234567890abcdef1234567890abcdef12", []byte("")},
+		{"c2b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", []byte("Hello from object 1")},
+		{"d2b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", bytes.Repeat([]byte("B"), 1024)},
+		{"e2b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", []byte("")},
 	}
 
 	t.Run("upload all objects", func(t *testing.T) {
@@ -90,8 +90,8 @@ func TestBatchUploadThenIndividualUploads(t *testing.T) {
 	metaStore := metadata.NewInMemoryStore()
 
 	objects := []BatchObject{
-		{OID: "batchflow-oid1-1234567890abcdef1234567890abcdef1234567890abcdef", Size: 512},
-		{OID: "batchflow-oid2-1234567890abcdef1234567890abcdef1234567890abcdef", Size: 256},
+		{OID: "f2b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", Size: 512},
+		{OID: "a3b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", Size: 256},
 	}
 
 	batchReq := &BatchRequest{
@@ -152,12 +152,12 @@ func TestEdgeCaseUploadEmptyBodyPipe(t *testing.T) {
 	objStore := storage.NewInMemoryStore()
 	metaStore := metadata.NewInMemoryStore()
 
-	err := HandleUpload(ctx, "empty-pipe-1234567890abcdef1234567890abcdef1234567890abcdef12", strings.NewReader(""), objStore, metaStore)
+	err := HandleUpload(ctx, "b3b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", strings.NewReader(""), objStore, metaStore)
 	if err != nil {
 		t.Fatalf("HandleUpload() with empty reader error = %v", err)
 	}
 
-	meta, err := metaStore.Get(ctx, "empty-pipe-1234567890abcdef1234567890abcdef1234567890abcdef12")
+	meta, err := metaStore.Get(ctx, "b3b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2")
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
@@ -171,10 +171,10 @@ func TestUploadDoesNotAffectOtherObjects(t *testing.T) {
 	objStore := storage.NewInMemoryStore()
 	metaStore := metadata.NewInMemoryStore()
 
-	HandleUpload(ctx, "isolated-oid1-1234567890abcdef1234567890abcdef1234567890abcdef", bytes.NewReader([]byte("first")), objStore, metaStore)
-	HandleUpload(ctx, "isolated-oid2-1234567890abcdef1234567890abcdef1234567890abcdef", bytes.NewReader([]byte("second")), objStore, metaStore)
+	HandleUpload(ctx, "c3b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", bytes.NewReader([]byte("first")), objStore, metaStore)
+	HandleUpload(ctx, "d3b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", bytes.NewReader([]byte("second")), objStore, metaStore)
 
-	r1, _, _ := HandleDownload(ctx, "isolated-oid1-1234567890abcdef1234567890abcdef1234567890abcdef", objStore, metaStore)
+	r1, _, _ := HandleDownload(ctx, "c3b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", objStore, metaStore)
 	defer r1.Close()
 	content, _ := io.ReadAll(r1)
 	if string(content) != "first" {
