@@ -23,3 +23,12 @@ Thumbs.db
 
 # Cloudflare
 .wrangler/
+
+# Test coverage
+coverage.out
+coverage.html
+
+# Local secrets
+.env
+.env.*
+.dev.vars
