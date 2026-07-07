@@ -6,10 +6,11 @@ package worker
 import (
 	"net/http"
 
-	"github.com/ordek1/git-me/internal/api"
-	"github.com/ordek1/git-me/internal/auth"
-	"github.com/ordek1/git-me/internal/config"
-	"github.com/ordek1/git-me/internal/storage"
+	"github.com/0xordek/git-me/internal/api"
+	"github.com/0xordek/git-me/internal/auth"
+	"github.com/0xordek/git-me/internal/config"
+	"github.com/0xordek/git-me/internal/metadata"
+	"github.com/0xordek/git-me/internal/storage"
 )
 
 // HandleRequest dispatches incoming HTTP requests to the appropriate handler.
@@ -23,7 +24,7 @@ func HandleRequest(w http.ResponseWriter, r *http.Request) {
 	authenticator := auth.NewBearerToken(cfg.AuthToken)
 
 	objStore := storage.NewCloudflareR2Store(cfg.R2Bucket)
-	metaStore := storage.NewCloudflareKVStore()
+	metaStore := metadata.NewCloudflareKVStore()
 
 	batchHandler := api.BatchHandler(objStore, metaStore, authenticator)
 	uploadHandler := api.UploadHandler(objStore, metaStore, authenticator)

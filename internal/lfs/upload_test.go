@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ordek1/git-me/internal/metadata"
-	"github.com/ordek1/git-me/internal/storage"
+	"github.com/0xordek/git-me/internal/metadata"
+	"github.com/0xordek/git-me/internal/storage"
 )
 
 func TestHandleUpload(t *testing.T) {

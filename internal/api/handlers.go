@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/ordek1/git-me/internal/auth"
-	"github.com/ordek1/git-me/internal/lfs"
-	"github.com/ordek1/git-me/internal/metadata"
-	"github.com/ordek1/git-me/internal/storage"
+	"github.com/0xordek/git-me/internal/auth"
+	"github.com/0xordek/git-me/internal/lfs"
+	"github.com/0xordek/git-me/internal/metadata"
+	"github.com/0xordek/git-me/internal/storage"
 )
 
 // BatchHandler returns an http.HandlerFunc that processes Git LFS batch requests.

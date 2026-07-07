@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ordek1/git-me/internal/metadata"
-	"github.com/ordek1/git-me/internal/storage"
+	"github.com/0xordek/git-me/internal/metadata"
+	"github.com/0xordek/git-me/internal/storage"
 )
 
 // HandleBatch processes a Git LFS batch request and returns the appropriate

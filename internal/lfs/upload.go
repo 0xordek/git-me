@@ -6,8 +6,8 @@ import (
 	"io"
 	"time"
 
-	"github.com/ordek1/git-me/internal/metadata"
-	"github.com/ordek1/git-me/internal/storage"
+	"github.com/0xordek/git-me/internal/metadata"
+	"github.com/0xordek/git-me/internal/storage"
 )
 
 // HandleUpload stores a binary object and records its metadata.

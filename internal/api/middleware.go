@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/ordek1/git-me/internal/auth"
-	"github.com/ordek1/git-me/internal/lfs"
+	"github.com/0xordek/git-me/internal/auth"
+	"github.com/0xordek/git-me/internal/lfs"
 )
 
 func authMiddleware(authenticator auth.Authenticator, next http.HandlerFunc) http.HandlerFunc {

@@ -5,8 +5,8 @@ import (
 	"errors"
 	"io"
 
-	"github.com/ordek1/git-me/internal/metadata"
-	"github.com/ordek1/git-me/internal/storage"
+	"github.com/0xordek/git-me/internal/metadata"
+	"github.com/0xordek/git-me/internal/storage"
 )
 
 // HandleDownload retrieves a stored object and its size for streaming to the client.

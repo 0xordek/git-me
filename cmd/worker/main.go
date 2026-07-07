@@ -6,7 +6,7 @@ package main
 import (
 	"net/http"
 
-	"github.com/ordek1/git-me/internal/worker"
+	"github.com/0xordek/git-me/internal/worker"
 )
 
 func main() {

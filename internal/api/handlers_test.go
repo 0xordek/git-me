@@ -10,10 +10,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ordek1/git-me/internal/auth"
-	"github.com/ordek1/git-me/internal/lfs"
-	"github.com/ordek1/git-me/internal/metadata"
-	"github.com/ordek1/git-me/internal/storage"
+	"github.com/0xordek/git-me/internal/auth"
+	"github.com/0xordek/git-me/internal/lfs"
+	"github.com/0xordek/git-me/internal/metadata"
+	"github.com/0xordek/git-me/internal/storage"
 )
 
 func setupTestStores() (storage.ObjectStore, metadata.MetadataStore) {

@@ -1,3 +1,3 @@
-module github.com/ordek1/git-me
+module github.com/0xordek/git-me
 
-go 1.26.4
+go 1.22
