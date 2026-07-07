@@ -1,7 +1,16 @@
 import { describe, expect, test } from 'vitest';
+import { presignR2Url } from '../src/signing';
 import worker, { type Env } from '../src/worker';
+import type { R2SigningConfig } from '../src/config';
 
 const oid = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2';
+
+const signing: R2SigningConfig = {
+  accountId: 'test-account',
+  accessKeyId: 'test-access-key',
+  secretAccessKey: 'test-secret-key',
+  bucketName: 'bucket',
+};
 
 class MemoryR2 {
   readonly objects = new Map<string, Uint8Array<ArrayBuffer>>();
@@ -55,6 +64,10 @@ function env(): TestEnv {
 
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
   return { Authorization: 'Bearer tok', ...extra };
+}
+
+function signedUrlParams(url: string): URLSearchParams {
+  return new URL(url).searchParams;
 }
 
 async function sha256Hex(text: string): Promise<string> {
@@ -253,5 +266,34 @@ describe('worker', () => {
     expect(res.status).toBe(200);
     expect(body.objects[0].error.code).toBe(404);
     expect(body.objects[0].actions).toBeUndefined();
+  });
+});
+
+describe('presignR2Url', () => {
+  test('returns R2 URL for PUT', async () => {
+    const url = new URL(await presignR2Url({ method: 'PUT', key: 'objects/' + oid, expiresSeconds: 900, signing, now: new Date('2026-01-02T03:04:05.000Z') }));
+    const params = signedUrlParams(url.href);
+
+    expect(url.host).toBe('test-account.r2.cloudflarestorage.com');
+    expect(url.pathname).toBe('/bucket/objects/' + oid);
+    expect(params.get('X-Amz-Algorithm')).toBe('AWS4-HMAC-SHA256');
+    expect(params.get('X-Amz-Credential')).toContain('test-access-key/20260102/auto/s3/aws4_request');
+    expect(params.get('X-Amz-Date')).toBe('20260102T030405Z');
+    expect(params.get('X-Amz-Expires')).toBe('900');
+    expect(params.get('X-Amz-SignedHeaders')).toBe('host');
+    expect(params.get('X-Amz-Content-Sha256')).toBe('UNSIGNED-PAYLOAD');
+    expect(params.get('X-Amz-Signature')).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test('encodes object keys by path segment', async () => {
+    const url = new URL(await presignR2Url({ method: 'GET', key: 'objects/space file.bin', expiresSeconds: 60, signing, now: new Date('2026-01-02T03:04:05.000Z') }));
+
+    expect(url.pathname).toBe('/bucket/objects/space%20file.bin');
+  });
+
+  test('signature is deterministic for fixed now', async () => {
+    const input = { method: 'GET' as const, key: 'objects/' + oid, expiresSeconds: 600, signing, now: new Date('2026-01-02T03:04:05.000Z') };
+
+    await expect(presignR2Url(input)).resolves.toBe(await presignR2Url(input));
   });
 });
