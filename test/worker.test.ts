@@ -62,6 +62,17 @@ function env(): TestEnv {
   return { GITME_AUTH_TOKEN: 'tok', GITME_R2: new MemoryR2() as R2Bucket & MemoryR2, GITME_KV: new MemoryKV() as KVNamespace & MemoryKV };
 }
 
+function directEnv(): TestEnv {
+  return {
+    ...env(),
+    GITME_TRANSFER_MODE: 'direct',
+    GITME_R2_ACCOUNT_ID: signing.accountId,
+    GITME_R2_ACCESS_KEY_ID: signing.accessKeyId,
+    GITME_R2_SECRET_ACCESS_KEY: signing.secretAccessKey,
+    GITME_R2_BUCKET_NAME: signing.bucketName,
+  };
+}
+
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
   return { Authorization: 'Bearer tok', ...extra };
 }
@@ -136,6 +147,30 @@ describe('worker', () => {
     expect(body.objects[0].actions.upload.href).toBe('https://example.com/objects/' + oid);
   });
 
+  test('direct batch upload returns signed R2 PUT action and pending metadata', async () => {
+    const e = directEnv();
+    const req = new Request('https://example.com/objects/batch', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/vnd.git-lfs+json' }),
+      body: JSON.stringify({ operation: 'upload', transfers: ['basic'], objects: [{ oid, size: 1 }] }),
+    });
+
+    const res = await worker.fetch(req, e, {} as ExecutionContext);
+    const body = await res.json() as { objects: Array<{ actions: { upload: { href: string; expires_in: number; method?: string } } }> };
+    const action = body.objects[0].actions.upload;
+    const url = new URL(action.href);
+    const meta = JSON.parse((await e.GITME_KV.get('object:' + oid)) || '{}') as { oid: string; size: number; uploaded: boolean };
+
+    expect(res.status).toBe(200);
+    expect(url.host).toBe('test-account.r2.cloudflarestorage.com');
+    expect(url.pathname).toBe('/bucket/objects/' + oid);
+    expect(url.searchParams.get('X-Amz-Algorithm')).toBe('AWS4-HMAC-SHA256');
+    expect(url.searchParams.get('X-Amz-Signature')).toMatch(/^[0-9a-f]{64}$/);
+    expect(action.expires_in).toBe(900);
+    expect(action.method).toBeUndefined();
+    expect(meta).toMatchObject({ oid, size: 1, uploaded: false });
+  });
+
   test('batch download returns absolute download action href', async () => {
     const e = env();
     await e.GITME_R2.put('objects/' + oid, 'x');
@@ -151,6 +186,64 @@ describe('worker', () => {
 
     expect(res.status).toBe(200);
     expect(body.objects[0].actions.download.href).toBe('https://example.com/objects/' + oid);
+  });
+
+  test('direct batch download finalizes pending metadata when R2 object exists', async () => {
+    const e = directEnv();
+    await e.GITME_R2.put('objects/' + oid, 'x');
+    await e.GITME_KV.put('object:' + oid, JSON.stringify({ oid, size: 1, created_at: '2026-01-02T03:04:05.000Z', uploaded: false }));
+    const req = new Request('https://example.com/objects/batch', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/vnd.git-lfs+json' }),
+      body: JSON.stringify({ operation: 'download', transfers: ['basic'], objects: [{ oid, size: 1 }] }),
+    });
+
+    const res = await worker.fetch(req, e, {} as ExecutionContext);
+    const body = await res.json() as { objects: Array<{ actions: { download: { href: string; expires_in: number } } }> };
+    const action = body.objects[0].actions.download;
+    const url = new URL(action.href);
+    const meta = JSON.parse((await e.GITME_KV.get('object:' + oid)) || '{}') as { uploaded: boolean };
+
+    expect(res.status).toBe(200);
+    expect(url.host).toBe('test-account.r2.cloudflarestorage.com');
+    expect(url.pathname).toBe('/bucket/objects/' + oid);
+    expect(url.searchParams.get('X-Amz-Algorithm')).toBe('AWS4-HMAC-SHA256');
+    expect(url.searchParams.get('X-Amz-Signature')).toMatch(/^[0-9a-f]{64}$/);
+    expect(action.expires_in).toBe(900);
+    expect(meta.uploaded).toBe(true);
+  });
+
+  test('direct batch download returns object error when pending object missing from R2', async () => {
+    const e = directEnv();
+    await e.GITME_KV.put('object:' + oid, JSON.stringify({ oid, size: 1, created_at: '2026-01-02T03:04:05.000Z', uploaded: false }));
+    const req = new Request('https://example.com/objects/batch', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/vnd.git-lfs+json' }),
+      body: JSON.stringify({ operation: 'download', transfers: ['basic'], objects: [{ oid, size: 1 }] }),
+    });
+
+    const res = await worker.fetch(req, e, {} as ExecutionContext);
+    const body = await res.json() as { objects: Array<{ error: { code: number }; actions?: unknown }> };
+
+    expect(res.status).toBe(200);
+    expect(body.objects[0].error.code).toBe(404);
+    expect(body.objects[0].actions).toBeUndefined();
+  });
+
+  test('direct mode missing signing config returns configuration error', async () => {
+    const e = { ...env(), GITME_TRANSFER_MODE: 'direct' };
+    const req = new Request('https://example.com/objects/batch', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/vnd.git-lfs+json' }),
+      body: JSON.stringify({ operation: 'upload', transfers: ['basic'], objects: [{ oid, size: 1 }] }),
+    });
+
+    const res = await worker.fetch(req, e, {} as ExecutionContext);
+    const body = await res.json() as { message: string };
+
+    expect(res.status).toBe(500);
+    expect(res.headers.get('Content-Type')).toBe('application/vnd.git-lfs+json');
+    expect(body).toEqual({ message: 'configuration error' });
   });
 
   test('batch rejects non-array transfers', async () => {

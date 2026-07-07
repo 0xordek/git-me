@@ -1,5 +1,6 @@
 import { ConfigError, healthResponse, loadConfig } from './config';
 import type { AppConfig } from './config';
+import { presignR2Url } from './signing';
 
 const LFS_CONTENT_TYPE = 'application/vnd.git-lfs+json';
 const OBJECT_PREFIX = 'objects/';
@@ -35,7 +36,7 @@ type ObjectMeta = {
   oid: string;
   size: number;
   created_at: string;
-  uploaded: true;
+  uploaded: boolean;
 };
 
 type DigestResult = {
@@ -64,7 +65,7 @@ export default {
       }
 
       if (url.pathname === '/objects/batch') {
-        return handleBatch(request, env);
+        return handleBatch(request, env, config);
       }
       if (url.pathname.startsWith('/objects/')) {
         const oid = url.pathname.slice('/objects/'.length);
@@ -79,7 +80,7 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
-async function handleBatch(request: Request, env: Env): Promise<Response> {
+async function handleBatch(request: Request, env: Env, config: AppConfig): Promise<Response> {
   if (request.method !== 'POST') return lfsError(405, 'method not allowed');
   if (!isLfsContentType(request.headers.get('Content-Type'))) {
     return lfsError(415, 'content type must be ' + LFS_CONTENT_TYPE);
@@ -110,6 +111,26 @@ async function handleBatch(request: Request, env: Env): Promise<Response> {
   for (const obj of objects) {
     const href = new URL(`/objects/${obj.oid}`, request.url).href;
     if (body.operation === 'upload') {
+      if (config.transferMode === 'direct' && config.r2Signing) {
+        const meta: ObjectMeta = { oid: obj.oid, size: obj.size, created_at: new Date().toISOString(), uploaded: false };
+        await env.GITME_KV.put(META_PREFIX + obj.oid, JSON.stringify(meta));
+        responseObjects.push({
+          oid: obj.oid,
+          size: obj.size,
+          actions: {
+            upload: {
+              href: await presignR2Url({
+                method: 'PUT',
+                key: OBJECT_PREFIX + obj.oid,
+                expiresSeconds: config.signedUrlTtlSeconds,
+                signing: config.r2Signing,
+              }),
+              expires_in: config.signedUrlTtlSeconds,
+            },
+          },
+        });
+        continue;
+      }
       responseObjects.push({ oid: obj.oid, size: obj.size, actions: { upload: { href } } });
       continue;
     }
@@ -121,8 +142,30 @@ async function handleBatch(request: Request, env: Env): Promise<Response> {
     }
     const meta = JSON.parse(metaText) as ObjectMeta;
     const head = await env.GITME_R2.head(OBJECT_PREFIX + obj.oid);
-    if (!meta.uploaded || !head) {
+    if (!head) {
       responseObjects.push(objectNotFound(obj));
+      continue;
+    }
+    if (!meta.uploaded) {
+      meta.uploaded = true;
+      await env.GITME_KV.put(META_PREFIX + obj.oid, JSON.stringify(meta));
+    }
+    if (config.transferMode === 'direct' && config.r2Signing) {
+      responseObjects.push({
+        oid: obj.oid,
+        size: meta.size,
+        actions: {
+          download: {
+            href: await presignR2Url({
+              method: 'GET',
+              key: OBJECT_PREFIX + obj.oid,
+              expiresSeconds: config.signedUrlTtlSeconds,
+              signing: config.r2Signing,
+            }),
+            expires_in: config.signedUrlTtlSeconds,
+          },
+        },
+      });
       continue;
     }
     responseObjects.push({ oid: obj.oid, size: meta.size, actions: { download: { href } } });
