@@ -163,7 +163,7 @@ describe('worker', () => {
     expect(meta).toMatchObject({ oid, size: 1, uploaded: false });
   });
 
-  test('direct batch upload keeps existing uploaded metadata when R2 size matches', async () => {
+  test('direct batch upload omits upload action for existing uploaded object when R2 size matches', async () => {
     const e = directEnv();
     const meta = { oid, size: 1, created_at: '2026-01-02T03:04:05.000Z', uploaded: true };
     await e.GITME_R2.put('objects/' + oid, 'x');
@@ -175,10 +175,10 @@ describe('worker', () => {
     });
 
     const res = await worker.fetch(req, e, {} as ExecutionContext);
-    const body = await res.json() as { objects: Array<{ actions: { upload: { href: string; expires_in: number } } }> };
+    const body = await res.json() as { objects: Array<{ oid: string; size: number; actions?: { upload?: unknown } }> };
 
     expect(res.status).toBe(200);
-    expect(new URL(body.objects[0].actions.upload.href).pathname).toBe('/bucket/objects/' + oid);
+    expect(body.objects[0]).toEqual({ oid, size: 1 });
     expect(JSON.parse((await e.GITME_KV.get('object:' + oid)) || '{}')).toEqual(meta);
   });
 
