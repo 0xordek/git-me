@@ -1,10 +1,8 @@
 # Build output
-/build/
 /dist/
-*.wasm
 
 # Dependencies
-/vendor/
+/node_modules/
 
 # IDE
 .idea/
@@ -19,9 +17,8 @@ Thumbs.db
 # Cloudflare
 .wrangler/
 
-# Test coverage
-coverage.out
-coverage.html
+# Coverage
+/coverage/
 
 # Local secrets
 .env
