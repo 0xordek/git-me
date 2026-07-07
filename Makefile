@@ -1,7 +1,7 @@
 .PHONY: build test test-cover dev deploy clean fmt lint js-test verify
 
 build:
-	mkdir -p build
+	node -e "require('node:fs').mkdirSync('build', { recursive: true })"
 	tinygo build -tags tinygo.wasm -o build/git-me.wasm -target wasm -no-debug ./cmd/worker/
 
 test:
