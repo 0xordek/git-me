@@ -63,6 +63,50 @@ async function sha256Hex(text: string): Promise<string> {
 }
 
 describe('worker', () => {
+  test('health returns ok in proxy mode without auth', async () => {
+    const res = await worker.fetch(new Request('https://example.com/health', { method: 'GET' }), env(), {} as ExecutionContext);
+    const body = await res.json() as { ok: boolean; transfer_mode: string };
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ ok: true, transfer_mode: 'proxy' });
+  });
+
+  test('health reports missing auth token', async () => {
+    const e = env() as Partial<TestEnv>;
+    delete e.GITME_AUTH_TOKEN;
+
+    const res = await worker.fetch(new Request('https://example.com/health', { method: 'GET' }), e as Env, {} as ExecutionContext);
+    const bodyText = await res.text();
+
+    expect(res.status).toBe(500);
+    expect(JSON.parse(bodyText)).toEqual({ ok: false });
+    expect(bodyText).not.toContain('tok');
+  });
+
+  test('invalid transfer mode fails closed', async () => {
+    const e = { ...env(), GITME_TRANSFER_MODE: 'weird' };
+    const req = new Request('https://example.com/objects/batch', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/vnd.git-lfs+json' }),
+      body: JSON.stringify({ operation: 'upload', transfers: ['basic'], objects: [{ oid, size: 1 }] }),
+    });
+
+    const res = await worker.fetch(req, e, {} as ExecutionContext);
+    const body = await res.json() as { message: string };
+
+    expect(res.status).toBe(500);
+    expect(res.headers.get('Content-Type')).toBe('application/vnd.git-lfs+json');
+    expect(body).toEqual({ message: 'configuration error' });
+  });
+
+  test('deletes design and plan docs', async () => {
+    // @ts-expect-error Worker tsconfig intentionally excludes Node built-in types.
+    const { execFileSync } = await import('node:child_process') as { execFileSync: (file: string, args: string[], options: { encoding: 'utf8' }) => string };
+    const tracked = execFileSync('git', ['ls-files', 'DESIGN.md', 'PLAN.md'], { encoding: 'utf8' });
+
+    expect(tracked).toBe('');
+  });
+
   test('batch upload returns upload action', async () => {
     const e = env();
     const req = new Request('https://example.com/objects/batch', {

@@ -1,10 +1,19 @@
+import { ConfigError, healthResponse, loadConfig } from './config';
+import type { AppConfig } from './config';
+
 const LFS_CONTENT_TYPE = 'application/vnd.git-lfs+json';
 const OBJECT_PREFIX = 'objects/';
 const META_PREFIX = 'object:';
 const OID_RE = /^[0-9a-fA-F]{64}$/;
 
 export interface Env {
-  GITME_AUTH_TOKEN: string;
+  GITME_AUTH_TOKEN?: string;
+  GITME_TRANSFER_MODE?: string;
+  GITME_SIGNED_URL_TTL_SECONDS?: string;
+  GITME_R2_ACCOUNT_ID?: string;
+  GITME_R2_ACCESS_KEY_ID?: string;
+  GITME_R2_SECRET_ACCESS_KEY?: string;
+  GITME_R2_BUCKET_NAME?: string;
   GITME_R2: R2Bucket;
   GITME_KV: KVNamespace;
 }
@@ -37,15 +46,23 @@ type DigestResult = {
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     try {
-      if (!env.GITME_AUTH_TOKEN) {
-        return lfsError(500, 'configuration error');
+      const url = new URL(request.url);
+      if (request.method === 'GET' && url.pathname === '/health') {
+        return healthResponse(env);
+      }
+
+      let config: AppConfig;
+      try {
+        config = loadConfig(env);
+      } catch (error) {
+        if (error instanceof ConfigError) return lfsError(500, 'configuration error');
+        throw error;
       }
       const auth = request.headers.get('Authorization') || '';
-      if (auth !== `Bearer ${env.GITME_AUTH_TOKEN}`) {
+      if (auth !== `Bearer ${config.authToken}`) {
         return lfsError(401, 'authentication required');
       }
 
-      const url = new URL(request.url);
       if (url.pathname === '/objects/batch') {
         return handleBatch(request, env);
       }
