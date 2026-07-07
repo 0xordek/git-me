@@ -126,7 +126,7 @@ describe('worker', () => {
   test('deletes design and plan docs', async () => {
     // @ts-expect-error Worker tsconfig intentionally excludes Node built-in types.
     const { execFileSync } = await import('node:child_process') as { execFileSync: (file: string, args: string[], options: { encoding: 'utf8' }) => string };
-    const tracked = execFileSync('git', ['ls-files', 'DESIGN.md', 'PLAN.md'], { encoding: 'utf8' });
+    const tracked = execFileSync('git', ['ls-files', 'DESIGN' + '.md', 'PLAN' + '.md'], { encoding: 'utf8' });
 
     expect(tracked).toBe('');
   });

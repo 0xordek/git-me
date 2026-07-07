@@ -20,10 +20,11 @@ npm run deploy:dry
 - Keep behavior covered by tests in `test/worker.test.ts`.
 - Never commit secrets. Use `wrangler secret put GITME_AUTH_TOKEN`.
 - Add or update tests for behavior changes.
+- When touching Git LFS batch actions, cover both `proxy` and `direct` transfer behavior.
 
 ## Before opening a PR
 
-Run:
+Run the full pre-PR check set:
 
 ```bash
 npm test
