@@ -1,6 +1,6 @@
 # git-me
 
-A self-hosted Git LFS server for Cloudflare Workers, R2, and KV.
+A small self-hosted Git LFS utility for Cloudflare Workers, R2, and KV.
 
 Built with TinyGo for the Go protocol core and a Cloudflare Worker module for deployment.
 
@@ -93,7 +93,7 @@ Report vulnerabilities through GitHub Security Advisories. See `SECURITY.md`.
 
 ## Contributing
 
-See `CONTRIBUTING.md`.
+Small fixes and focused issues are welcome. See `CONTRIBUTING.md`.
 
 ## License
 
