@@ -149,6 +149,28 @@ test('hash mismatch does not write KV metadata', async () => {
   assert.equal(await e.GITME_R2.get('objects/' + oid), null);
 });
 
+test('hash mismatch preserves existing object and metadata', async () => {
+  const e = env();
+  const content = 'existing bytes';
+  const realOID = await sha256Hex(content);
+  const meta = { oid: realOID, size: content.length, created_at: '2026-01-02T03:04:05.000Z', uploaded: true };
+  await e.GITME_R2.put('objects/' + realOID, content);
+  await e.GITME_KV.put('object:' + realOID, JSON.stringify(meta));
+  const req = new Request('https://example.com/objects/' + realOID, {
+    method: 'PUT',
+    headers: authHeaders(),
+    body: 'wrong bytes',
+  });
+
+  const res = await worker.fetch(req, e);
+  const object = await e.GITME_R2.get('objects/' + realOID);
+
+  assert.equal(res.status, 400);
+  assert.ok(object);
+  assert.equal(await new Response(object.body).text(), content);
+  assert.deepEqual(JSON.parse(await e.GITME_KV.get('object:' + realOID)), meta);
+});
+
 test('batch download returns object error when R2 object missing', async () => {
   const e = env();
   await e.GITME_KV.put('object:' + oid, JSON.stringify({ oid, size: 1, created_at: new Date().toISOString(), uploaded: true }));

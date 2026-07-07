@@ -84,15 +84,21 @@ async function handleUpload(request, env, oid) {
   if (!OID_RE.test(oid)) return lfsError(400, 'invalid oid');
   if (!request.body) return lfsError(400, 'missing request body');
 
+  const objectKey = OBJECT_PREFIX + oid;
+  const tempKey = OBJECT_PREFIX + '.tmp/' + crypto.randomUUID();
   const [storeStream, digestStream] = request.body.tee();
-  const putPromise = env.GITME_R2.put(OBJECT_PREFIX + oid, storeStream);
+  const putPromise = env.GITME_R2.put(tempKey, storeStream);
   const digest = await digestAndCount(digestStream);
   await putPromise;
 
   if (digest.hex.toLowerCase() !== oid.toLowerCase()) {
-    await env.GITME_R2.delete(OBJECT_PREFIX + oid);
+    await env.GITME_R2.delete(tempKey);
     return lfsError(400, 'upload hash mismatch');
   }
+
+  const tempObject = await env.GITME_R2.get(tempKey);
+  await env.GITME_R2.put(objectKey, tempObject.body);
+  await env.GITME_R2.delete(tempKey);
 
   const meta = { oid, size: digest.size, created_at: new Date().toISOString(), uploaded: true };
   await env.GITME_KV.put(META_PREFIX + oid, JSON.stringify(meta));
