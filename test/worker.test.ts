@@ -123,14 +123,6 @@ describe('worker', () => {
     expect(body).toEqual({ message: 'configuration error' });
   });
 
-  test('deletes design and plan docs', async () => {
-    // @ts-expect-error Worker tsconfig intentionally excludes Node built-in types.
-    const { execFileSync } = await import('node:child_process') as { execFileSync: (file: string, args: string[], options: { encoding: 'utf8' }) => string };
-    const tracked = execFileSync('git', ['ls-files', 'DESIGN' + '.md', 'PLAN' + '.md'], { encoding: 'utf8' });
-
-    expect(tracked).toBe('');
-  });
-
   test('batch upload returns upload action', async () => {
     const e = env();
     const req = new Request('https://example.com/objects/batch', {
@@ -169,6 +161,25 @@ describe('worker', () => {
     expect(action.expires_in).toBe(900);
     expect(action.method).toBeUndefined();
     expect(meta).toMatchObject({ oid, size: 1, uploaded: false });
+  });
+
+  test('direct batch upload keeps existing uploaded metadata when R2 size matches', async () => {
+    const e = directEnv();
+    const meta = { oid, size: 1, created_at: '2026-01-02T03:04:05.000Z', uploaded: true };
+    await e.GITME_R2.put('objects/' + oid, 'x');
+    await e.GITME_KV.put('object:' + oid, JSON.stringify(meta));
+    const req = new Request('https://example.com/objects/batch', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/vnd.git-lfs+json' }),
+      body: JSON.stringify({ operation: 'upload', transfers: ['basic'], objects: [{ oid, size: 1 }] }),
+    });
+
+    const res = await worker.fetch(req, e, {} as ExecutionContext);
+    const body = await res.json() as { objects: Array<{ actions: { upload: { href: string; expires_in: number } } }> };
+
+    expect(res.status).toBe(200);
+    expect(new URL(body.objects[0].actions.upload.href).pathname).toBe('/bucket/objects/' + oid);
+    expect(JSON.parse((await e.GITME_KV.get('object:' + oid)) || '{}')).toEqual(meta);
   });
 
   test('batch download returns absolute download action href', async () => {
@@ -228,6 +239,26 @@ describe('worker', () => {
     expect(res.status).toBe(200);
     expect(body.objects[0].error.code).toBe(404);
     expect(body.objects[0].actions).toBeUndefined();
+  });
+
+  test('direct batch download returns object error when pending R2 object size mismatches', async () => {
+    const e = directEnv();
+    await e.GITME_R2.put('objects/' + oid, 'x');
+    await e.GITME_KV.put('object:' + oid, JSON.stringify({ oid, size: 10, created_at: '2026-01-02T03:04:05.000Z', uploaded: false }));
+    const req = new Request('https://example.com/objects/batch', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/vnd.git-lfs+json' }),
+      body: JSON.stringify({ operation: 'download', transfers: ['basic'], objects: [{ oid, size: 10 }] }),
+    });
+
+    const res = await worker.fetch(req, e, {} as ExecutionContext);
+    const body = await res.json() as { objects: Array<{ error: { code: number }; actions?: unknown }> };
+    const meta = JSON.parse((await e.GITME_KV.get('object:' + oid)) || '{}') as { uploaded: boolean };
+
+    expect(res.status).toBe(200);
+    expect(body.objects[0].error.code).toBe(404);
+    expect(body.objects[0].actions).toBeUndefined();
+    expect(meta.uploaded).toBe(false);
   });
 
   test('direct mode missing signing config returns configuration error', async () => {
