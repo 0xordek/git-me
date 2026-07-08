@@ -1,4 +1,6 @@
 {
+  "name": "git-me",
+  "version": "0.0.0",
   "type": "module",
   "bin": {
     "git-me": "dist/cli.js"

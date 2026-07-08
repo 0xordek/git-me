@@ -25,6 +25,7 @@ type FsModule = {
   createReadStream(path: string): unknown;
   createWriteStream(path: string): unknown;
 };
+type FsPromises = { stat(path: string): Promise<{ size: number }> };
 type StreamModule = { Readable: { fromWeb(stream: ReadableStream<Uint8Array>): unknown } };
 type StreamPromises = { pipeline(source: unknown, destination: unknown): Promise<void> };
 
@@ -34,10 +35,12 @@ export function mergeActionHeaders(base: HeaderMap, actionHeaders?: HeaderMap): 
 
 export class LfsClient {
   private readonly baseUrl: string;
+  private readonly baseOrigin: string;
   private readonly headers: HeaderMap;
 
   constructor(options: { baseUrl: string; headers?: HeaderMap }) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
+    this.baseOrigin = new URL(this.baseUrl).origin;
     this.headers = options.headers ?? {};
   }
 
@@ -53,7 +56,7 @@ export class LfsClient {
   }
 
   async downloadToFile(href: string, filePath: string, headers?: HeaderMap): Promise<void> {
-    const response = await fetch(href, { method: 'GET', headers: mergeActionHeaders(this.headers, headers) });
+    const response = await fetch(href, { method: 'GET', headers: this.actionHeaders(href, headers) });
     await throwIfFailed(response, 'LFS download');
     if (!response.body) throw new Error('LFS download failed: response body missing');
 
@@ -67,16 +70,23 @@ export class LfsClient {
   }
 
   async uploadFromFile(href: string, filePath: string, headers?: HeaderMap): Promise<void> {
-    const fs = await nodeImport<FsModule>('node:fs');
+    const [fs, fsPromises] = await Promise.all([nodeImport<FsModule>('node:fs'), nodeImport<FsPromises>('node:fs/promises')]);
+    const stat = await fsPromises.stat(filePath);
     const init = {
       method: 'PUT',
-      headers: mergeActionHeaders(this.headers, headers),
+      headers: { ...this.actionHeaders(href, headers), 'Content-Length': String(stat.size) },
       body: fs.createReadStream(filePath) as BodyInit,
       duplex: 'half',
     } as RequestInit;
 
     const response = await fetch(href, init);
     await throwIfFailed(response, 'LFS upload');
+  }
+
+  private actionHeaders(href: string, headers?: HeaderMap): HeaderMap {
+    const actionOrigin = new URL(href, this.baseUrl).origin;
+    if (actionOrigin !== this.baseOrigin) return headers ?? {};
+    return mergeActionHeaders(this.headers, headers);
   }
 }
 

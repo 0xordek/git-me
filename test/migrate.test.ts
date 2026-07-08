@@ -105,7 +105,27 @@ describe('migrate', () => {
 
     expect(source.batchCalls).toEqual([]);
     expect(target.batchCalls).toEqual([]);
+    expect(deps.createClient).not.toHaveBeenCalled();
+    expect(deps.getGitConfig).not.toHaveBeenCalled();
     expect(deps.setGitConfig).not.toHaveBeenCalled();
+  });
+
+  test('dry-run does not need sourceUrl or git config lfs.url', async () => {
+    const oid = 'c'.repeat(64);
+    const deps = fakeDeps([pointer(oid, 5)], [], { getGitConfig: vi.fn(async () => { throw new Error('lfs.url missing'); }) });
+
+    await expect(migrate({
+      repoPath: '/repo',
+      sourceHeaders: {},
+      targetUrl: 'https://target.example/lfs',
+      targetToken: 'target-token',
+      concurrency: 4,
+      dryRun: true,
+      writeConfig: false,
+    }, deps)).resolves.toEqual({ scanned: 1, unique: 1, migrated: 0, skipped: 0, failed: [] });
+
+    expect(deps.getGitConfig).not.toHaveBeenCalled();
+    expect(deps.createClient).not.toHaveBeenCalled();
   });
 
   test('downloads, verifies, uploads, then checks target download action', async () => {
@@ -158,6 +178,31 @@ describe('migrate', () => {
     expect(target.uploads).toEqual([]);
   });
 
+  test('records target verification failure when download action is missing after upload', async () => {
+    const bytes = new TextEncoder().encode('verified');
+    const oid = await sha256Hex(bytes);
+    const object = { oid, size: bytes.byteLength };
+    const source = new FakeLfsClient({ download: [{ objects: [{ ...object, actions: { download: { href: 'https://source/object' } } }] }] }, bytes);
+    const target = new FakeLfsClient({
+      upload: [{ objects: [{ ...object, actions: { upload: { href: 'https://target/upload' } } }] }],
+      download: [{ objects: [{ ...object, actions: {} }] }],
+    });
+    const deps = fakeDeps([pointer(oid, bytes.byteLength)], [source, target]);
+
+    await expect(migrate({
+      repoPath: '/repo',
+      sourceUrl: 'https://source.example/lfs',
+      sourceHeaders: {},
+      targetUrl: 'https://target.example/lfs',
+      targetToken: 'target-token',
+      concurrency: 1,
+      dryRun: false,
+      writeConfig: false,
+    }, deps)).resolves.toEqual({ scanned: 1, unique: 1, migrated: 0, skipped: 0, failed: [{ oid, reason: 'target download action missing' }] });
+
+    expect(target.uploads).toEqual([{ href: 'https://target/upload', filePath: expect.any(String), headers: undefined }]);
+  });
+
   test('writes target lfs.url only after non-dry migration completes with no failures', async () => {
     const bytes = new TextEncoder().encode('ok');
     const oid = await sha256Hex(bytes);
@@ -183,7 +228,7 @@ describe('migrate', () => {
     expect(deps.setGitConfig).toHaveBeenCalledWith('/repo', 'lfs.url', 'https://target.example/lfs');
   });
 
-  test('discovers source URL from git config when sourceUrl is missing', async () => {
+  test('discovers source URL from git config when sourceUrl is missing for real migration', async () => {
     const deps = fakeDeps([], [new FakeLfsClient({}), new FakeLfsClient({})]);
 
     await migrate({
@@ -192,7 +237,7 @@ describe('migrate', () => {
       targetUrl: 'https://target.example/lfs',
       targetToken: 'target-token',
       concurrency: 1,
-      dryRun: true,
+      dryRun: false,
       writeConfig: false,
     }, deps);
 

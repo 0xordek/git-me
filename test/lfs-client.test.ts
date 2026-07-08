@@ -99,6 +99,19 @@ describe('LfsClient file transfers', () => {
     expect((await fs.readFile(path)).toString()).toBe('\x01\x02\x03');
   });
 
+  test('downloadToFile omits base auth headers for cross-origin action URLs', async () => {
+    const { path } = await createTempFile('download.bin');
+    const fetchMock = mockFetch(new Response(new Uint8Array([1]).buffer));
+
+    await new LfsClient({ baseUrl: 'https://lfs.example/repo', headers: { Authorization: 'Bearer base', 'X-Source': 'base' } }).downloadToFile('https://storage.example/object', path, { Authorization: 'Bearer action', 'X-Action': 'yes' });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = requestHeaders(init);
+    expect(headers.get('Authorization')).toBe('Bearer action');
+    expect(headers.get('X-Source')).toBeNull();
+    expect(headers.get('X-Action')).toBe('yes');
+  });
+
   test('uploadFromFile sends PUT with file body', async () => {
     const { path } = await createTempFile('upload.bin', 'payload');
     const fetchMock = mockFetch(new Response(null, { status: 200 }));
@@ -111,7 +124,22 @@ describe('LfsClient file transfers', () => {
     expect(init.method).toBe('PUT');
     expect(headers.get('Authorization')).toBe('Bearer base');
     expect(headers.get('X-Action')).toBe('yes');
+    expect(headers.get('Content-Length')).toBe('7');
     expect(init.body).not.toBe('payload');
     expect(init.body).toBeTruthy();
+  });
+
+  test('uploadFromFile omits base auth headers for cross-origin action URLs', async () => {
+    const { path } = await createTempFile('upload.bin', 'payload');
+    const fetchMock = mockFetch(new Response(null, { status: 200 }));
+
+    await new LfsClient({ baseUrl: 'https://lfs.example/repo', headers: { Authorization: 'Bearer base', 'X-Source': 'base' } }).uploadFromFile('https://storage.example/object', path, { Authorization: 'Bearer action', 'X-Action': 'yes' });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = requestHeaders(init);
+    expect(headers.get('Authorization')).toBe('Bearer action');
+    expect(headers.get('X-Source')).toBeNull();
+    expect(headers.get('X-Action')).toBe('yes');
+    expect(headers.get('Content-Length')).toBe('7');
   });
 });

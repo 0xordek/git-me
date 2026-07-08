@@ -68,10 +68,7 @@ export async function migrate(options: MigrateOptions, deps: MigrateDeps = {}): 
   const getGitConfig = deps.getGitConfig ?? getGitConfigValue;
   const setGitConfig = deps.setGitConfig ?? setGitConfigValue;
 
-  const [pointers, sourceUrl] = await Promise.all([
-    scan(options.repoPath),
-    options.sourceUrl ? Promise.resolve(options.sourceUrl) : getGitConfig(options.repoPath, 'lfs.url'),
-  ]);
+  const pointers = await scan(options.repoPath);
   const uniqueObjects = uniqueLfsObjects(pointers);
   const result: MigrationResult = {
     scanned: pointers.length,
@@ -81,10 +78,11 @@ export async function migrate(options: MigrateOptions, deps: MigrateDeps = {}): 
     failed: [],
   };
 
+  if (options.dryRun) return result;
+
+  const sourceUrl = options.sourceUrl ?? await getGitConfig(options.repoPath, 'lfs.url');
   const source = createClient({ baseUrl: sourceUrl.trim(), headers: options.sourceHeaders });
   const target = createClient({ baseUrl: options.targetUrl, headers: { Authorization: `Bearer ${options.targetToken}` } });
-
-  if (options.dryRun) return result;
 
   await runPool(uniqueObjects, options.concurrency, async (object) => {
     const tempPath = await createTempPath();
@@ -101,7 +99,8 @@ export async function migrate(options: MigrateOptions, deps: MigrateDeps = {}): 
       }
 
       await target.uploadFromFile(upload.href, tempPath, upload.header);
-      await batchAction(target, 'download', object, 'download');
+      const targetDownload = await batchAction(target, 'download', object, 'download');
+      if (!targetDownload) throw new Error('target download action missing');
       result.migrated += 1;
     } catch (error) {
       result.failed.push({ oid: object.oid, reason: errorMessage(error) });
