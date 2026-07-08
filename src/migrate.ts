@@ -39,8 +39,15 @@ export type MigrateDeps = {
 const nodeImport = <T>(specifier: string): Promise<T> => import(/* @vite-ignore */ specifier) as Promise<T>;
 
 type FsPromises = {
-  readFile(path: string): Promise<Uint8Array>;
   rm(path: string, options: { force: boolean }): Promise<void>;
+};
+type FsModule = { createReadStream(path: string): ReadStreamLike };
+type Hash = { update(data: Uint8Array): void; digest(encoding: 'hex'): string };
+type CryptoModule = { createHash(algorithm: 'sha256'): Hash };
+type ReadStreamLike = {
+  on(event: 'data', listener: (chunk: Uint8Array) => void): ReadStreamLike;
+  on(event: 'error', listener: (error: Error) => void): ReadStreamLike;
+  on(event: 'end', listener: () => void): ReadStreamLike;
 };
 type Os = { tmpdir(): string };
 type Path = { join(...parts: string[]): string };
@@ -147,10 +154,15 @@ async function runPool<T>(items: T[], concurrency: number, worker: (item: T) => 
 }
 
 async function sha256File(path: string): Promise<string> {
-  const fs = await nodeImport<FsPromises>('node:fs/promises');
-  const bytes = await fs.readFile(path);
-  const digest = await crypto.subtle.digest('SHA-256', bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  const [fs, cryptoModule] = await Promise.all([nodeImport<FsModule>('node:fs'), nodeImport<CryptoModule>('node:crypto')]);
+  const hash = cryptoModule.createHash('sha256');
+  const stream = fs.createReadStream(path);
+
+  return await new Promise((resolve, reject) => {
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
 }
 
 async function defaultCreateTempPath(): Promise<string> {
