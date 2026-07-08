@@ -5,6 +5,9 @@
   "bin": {
     "git-me": "dist/cli.js"
   },
+  "files": [
+    "dist/cli.js"
+  ],
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
