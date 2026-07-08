@@ -13,4 +13,5 @@ All notable changes to this project will be documented in this file.
 - Kept edge-case tests for Git LFS batch, upload, download, and auth behavior.
 - Added opt-in direct R2 transfer mode using signed URLs.
 - Added `GET /health` for configuration health checks.
+- Added `npx git-me migrate` for copying existing Git LFS objects into `git-me`.
 - Removed temporary design and plan docs from the tracked tree when present.

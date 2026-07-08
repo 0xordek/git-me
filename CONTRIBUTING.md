@@ -8,9 +8,7 @@
 git clone git@github.com:0xordek/git-me.git
 cd git-me
 npm ci
-npm test
-npm run typecheck
-npm run deploy:dry
+npm run check
 ```
 
 ## Guidelines
@@ -21,13 +19,12 @@ npm run deploy:dry
 - Never commit secrets. Use `wrangler secret put GITME_AUTH_TOKEN`.
 - Add or update tests for behavior changes.
 - When touching Git LFS batch actions, cover both `proxy` and `direct` transfer behavior.
+- When touching migration CLI code, run or update the CLI and migration tests in `test/cli.test.ts` and `test/migrate.test.ts`.
 
 ## Before opening a PR
 
 Run the full pre-PR check set:
 
 ```bash
-npm test
-npm run typecheck
-npm run deploy:dry
+npm run check
 ```
