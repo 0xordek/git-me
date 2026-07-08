@@ -93,8 +93,7 @@ function parseMigrateArgs(args: string[], defaultRepoPath: string): { options: M
 }
 
 function parseHeader(input: string): { name: string; value: string } | null {
-  const separator = input.includes(':') ? ':' : '=';
-  const index = input.indexOf(separator);
+  const index = input.indexOf(':');
   if (index < 1) return null;
   const name = input.slice(0, index).trim();
   const value = input.slice(index + 1).trim();
@@ -106,7 +105,7 @@ function topLevelUsage(): string {
 }
 
 function migrateUsage(): string {
-  return `Usage: git-me migrate --target <url> --token <token> [options]\n\nOptions:\n  --repo <path>                 repository path (default: current directory)\n  --source-url <url>            source LFS URL (default: git config lfs.url)\n  --source-header <name=value>  source LFS header, repeatable\n  --concurrency <number>        concurrent transfers, 1..16 (default: 4)\n  --dry-run                     scan without transferring objects\n  --write-config                update lfs.url after successful migration\n`;
+  return `Usage: git-me migrate --target <url> --token <token> [options]\n\nOptions:\n  --repo <path>                 repository path (default: current directory)\n  --source-url <url>            source LFS URL (default: git config lfs.url)\n  --source-header <name: value> source LFS header, repeatable\n  --concurrency <number>        concurrent transfers, 1..16 (default: 4)\n  --dry-run                     scan without transferring objects\n  --write-config                update lfs.url after successful migration\n`;
 }
 
 function formatResult(result: MigrationResult): string {

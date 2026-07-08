@@ -120,7 +120,7 @@ Private source repositories usually require an extra source header. Repeat `--so
 ```bash
 npx git-me migrate \
   --source-url https://github.com/OWNER/PRIVATE-REPO.git/info/lfs \
-  --source-header "Authorization=Bearer <github-token>" \
+  --source-header "Authorization: Bearer <github-token>" \
   --target https://your-worker.workers.dev \
   --token <git-me-token> \
   --dry-run

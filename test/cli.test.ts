@@ -38,6 +38,7 @@ describe('runCli', () => {
 
     expect(testIO.out.join('')).toContain('Usage: git-me migrate --target <url> --token <token>');
     expect(testIO.out.join('')).toContain('--source-url <url>');
+    expect(testIO.out.join('')).toContain('--source-header <name: value>');
     expect(testIO.err).toEqual([]);
   });
 
@@ -86,12 +87,25 @@ describe('runCli', () => {
       '--target', 'https://target.example/lfs',
       '--token', 'tok',
       '--concurrency', '3',
-      '--source-header', 'Authorization=Bearer source',
+      '--source-header', 'Authorization: Bearer source',
       '--source-header', 'X-Custom: value',
       '--dry-run',
       '--write-config',
     ], testIO)).resolves.toBe(0);
 
     expect(testIO.calls).toEqual([{ repoPath: '/work/repo', sourceUrl: 'https://source.example/lfs', sourceHeaders: { Authorization: 'Bearer source', 'X-Custom': 'value' }, targetUrl: 'https://target.example/lfs', targetToken: 'tok', concurrency: 3, dryRun: true, writeConfig: true }]);
+  });
+
+  test('rejects source headers without colon separator', async () => {
+    const testIO = io();
+
+    await expect(runCli([
+      'migrate',
+      '--target', 'https://target.example/lfs',
+      '--token', 'tok',
+      '--source-header', 'Authorization=Bearer source',
+    ], testIO)).resolves.toBe(2);
+
+    expect(testIO.err.join('')).toContain('invalid --source-header');
   });
 });
