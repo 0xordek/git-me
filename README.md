@@ -85,6 +85,58 @@ git config lfs.http.https://your-worker.workers.dev.locksverify false
 
 Then use `git push` and `git pull` as normal.
 
+## Migrating Existing LFS Objects
+
+Use the migration CLI from a local repository to copy objects from the current LFS server into `git-me`:
+
+```bash
+npx git-me migrate --target https://your-worker.workers.dev --token <git-me-token> --dry-run
+```
+
+Run `--dry-run` first. It scans local Git LFS pointer files, deduplicates object IDs, and reports `scanned`, `unique`, `migrated`, `skipped`, and `failed` without transferring object bytes or writing Git config.
+
+For a GitHub source, pass the source LFS URL explicitly when it is not already in `git config lfs.url`:
+
+```bash
+npx git-me migrate \
+  --source-url https://github.com/OWNER/REPO.git/info/lfs \
+  --target https://your-worker.workers.dev \
+  --token <git-me-token> \
+  --dry-run
+```
+
+For another Git LFS server, use its Batch API base URL as `--source-url`:
+
+```bash
+npx git-me migrate \
+  --source-url https://source.example.com/repo.git/info/lfs \
+  --target https://your-worker.workers.dev \
+  --token <git-me-token> \
+  --dry-run
+```
+
+Private source repositories usually require an extra source header. Repeat `--source-header` for every header the source LFS server needs:
+
+```bash
+npx git-me migrate \
+  --source-url https://github.com/OWNER/PRIVATE-REPO.git/info/lfs \
+  --source-header "Authorization=Bearer <github-token>" \
+  --target https://your-worker.workers.dev \
+  --token <git-me-token> \
+  --dry-run
+```
+
+After a successful real migration, add `--write-config` to update the repository's `lfs.url` to the target:
+
+```bash
+npx git-me migrate \
+  --target https://your-worker.workers.dev \
+  --token <git-me-token> \
+  --write-config
+```
+
+Safety model: the CLI uses the generic Git LFS Batch API for source downloads and target uploads. Object bytes are streamed through temporary files named `git-me-migrate-*` in the OS temp directory, not buffered in memory, and each downloaded file must match the pointer SHA-256 OID before upload. Temporary files are removed after each object attempt, and `--write-config` only runs when the migration has no failures.
+
 ## API Endpoints
 
 | Method | Path | Purpose |
