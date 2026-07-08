@@ -73,12 +73,12 @@ function parseMigrateArgs(args: string[], defaultRepoPath: string): { options: M
     index += 1;
 
     if (arg === '--repo') repoPath = value;
-    else if (arg === '--source') sourceUrl = value;
+    else if (arg === '--source-url') sourceUrl = value;
     else if (arg === '--target') targetUrl = value;
     else if (arg === '--token') targetToken = value;
     else if (arg === '--concurrency') {
       concurrency = Number(value);
-      if (!Number.isInteger(concurrency) || concurrency < 1) return { error: 'invalid --concurrency' };
+      if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16) return { error: 'invalid --concurrency' };
     } else if (arg === '--source-header') {
       const header = parseHeader(value);
       if (!header) return { error: 'invalid --source-header' };
@@ -106,7 +106,7 @@ function topLevelUsage(): string {
 }
 
 function migrateUsage(): string {
-  return `Usage: git-me migrate --target <url> --token <token> [options]\n\nOptions:\n  --repo <path>                 repository path (default: current directory)\n  --source <url>                source LFS URL (default: git config lfs.url)\n  --source-header <name=value>  source LFS header, repeatable\n  --concurrency <number>        concurrent transfers (default: 4)\n  --dry-run                     scan without transferring objects\n  --write-config                update lfs.url after successful migration\n`;
+  return `Usage: git-me migrate --target <url> --token <token> [options]\n\nOptions:\n  --repo <path>                 repository path (default: current directory)\n  --source-url <url>            source LFS URL (default: git config lfs.url)\n  --source-header <name=value>  source LFS header, repeatable\n  --concurrency <number>        concurrent transfers, 1..16 (default: 4)\n  --dry-run                     scan without transferring objects\n  --write-config                update lfs.url after successful migration\n`;
 }
 
 function formatResult(result: MigrationResult): string {

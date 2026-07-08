@@ -37,6 +37,7 @@ describe('runCli', () => {
     await expect(runCli(['migrate', '--help'], testIO)).resolves.toBe(0);
 
     expect(testIO.out.join('')).toContain('Usage: git-me migrate --target <url> --token <token>');
+    expect(testIO.out.join('')).toContain('--source-url <url>');
     expect(testIO.err).toEqual([]);
   });
 
@@ -67,13 +68,21 @@ describe('runCli', () => {
     expect(testIO.err.join('')).toContain('invalid --concurrency');
   });
 
+  test('concurrency above 16 exits 2', async () => {
+    const testIO = io();
+
+    await expect(runCli(['migrate', '--target', 'https://target.example/lfs', '--token', 'tok', '--concurrency', '17'], testIO)).resolves.toBe(2);
+
+    expect(testIO.err.join('')).toContain('invalid --concurrency');
+  });
+
   test('parses migrate options and repeated source headers', async () => {
     const testIO = io();
 
     await expect(runCli([
       'migrate',
       '--repo', '/work/repo',
-      '--source', 'https://source.example/lfs',
+      '--source-url', 'https://source.example/lfs',
       '--target', 'https://target.example/lfs',
       '--token', 'tok',
       '--concurrency', '3',
