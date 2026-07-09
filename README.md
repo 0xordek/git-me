@@ -100,7 +100,17 @@ git config lfs.url https://your-worker.workers.dev
 git config lfs.http.https://your-worker.workers.dev.locksverify false
 ```
 
+For shared repositories, commit `.lfsconfig` so fresh clones use the Worker too:
+
+```bash
+git config -f .lfsconfig lfs.url https://your-worker.workers.dev
+git add .lfsconfig
+git commit -m "chore: configure git-me lfs"
+```
+
 Then use `git push` and `git pull` as normal. On first LFS access, Git asks for username and password. Git Credential Manager stores it on the machine, so deleting and cloning the repo again usually does not ask while the worker host stays the same.
+
+The admin bearer token also works for LFS as an emergency write credential, but normal users should use Basic auth users created through `/admin/users/{username}`.
 
 ## Migrating Existing LFS Objects
 
@@ -173,6 +183,7 @@ Batch requests and error responses use `application/vnd.git-lfs+json`.
 - R2 object key: `objects/<oid>`
 - Temporary upload key prefix: `objects/.tmp/`
 - KV metadata key: `object:<oid>`
+- KV user key: `user:<username>`
 
 ## Development
 

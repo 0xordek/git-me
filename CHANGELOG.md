@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.2.0 - 2026-07-09
+
+- Added admin-managed Git LFS users backed by KV.
+- Added Basic auth prompts for Git LFS clients.
+- Added read/write access checks for pull and push flows.
+- Documented first-login credential storage and repo-level `.lfsconfig` setup.
+
 ## 0.1.0 - 2026-07-09
 
 - Rewrote the Worker runtime as TypeScript.

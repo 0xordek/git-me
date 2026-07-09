@@ -9,4 +9,4 @@ bucket_name = "git-me-objects"
 
 [[kv_namespaces]]
 binding = "GITME_KV"
-id = "<kv_namespace_id>"
+id = "00000000000000000000000000000000"
