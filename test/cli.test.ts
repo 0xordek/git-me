@@ -2,10 +2,13 @@ import { describe, expect, test, vi } from 'vitest';
 import { runCli, type CliIO } from '../src/cli';
 import type { MigrateOptions, MigrationResult } from '../src/migrate';
 
-function io(overrides: Partial<CliIO> = {}): CliIO & { out: string[]; err: string[]; calls: MigrateOptions[] } {
+type UserCall = Parameters<NonNullable<CliIO['userRequest']>>[0];
+
+function io(overrides: Partial<CliIO> = {}): CliIO & { out: string[]; err: string[]; calls: MigrateOptions[]; userCalls: UserCall[] } {
   const out: string[] = [];
   const err: string[] = [];
   const calls: MigrateOptions[] = [];
+  const userCalls: UserCall[] = [];
   return {
     cwd: () => '/repo',
     stdout: (text) => out.push(text),
@@ -14,9 +17,14 @@ function io(overrides: Partial<CliIO> = {}): CliIO & { out: string[]; err: strin
       calls.push(options);
       return { scanned: 1, unique: 1, migrated: 1, skipped: 0, failed: [] } satisfies MigrationResult;
     }),
+    userRequest: vi.fn(async (options) => {
+      userCalls.push(options);
+      return options.action === 'delete' ? { username: options.username, deleted: true } : { username: options.username, access: options.access };
+    }),
     out,
     err,
     calls,
+    userCalls,
     ...overrides,
   };
 }
@@ -28,6 +36,16 @@ describe('runCli', () => {
     await expect(runCli(['--help'], testIO)).resolves.toBe(0);
 
     expect(testIO.out.join('')).toContain('Usage: git-me <command>');
+    expect(testIO.out.join('')).toContain('user     manage git-me LFS users');
+    expect(testIO.err).toEqual([]);
+  });
+
+  test('prints user help and exits 0', async () => {
+    const testIO = io();
+
+    await expect(runCli(['user', '--help'], testIO)).resolves.toBe(0);
+
+    expect(testIO.out.join('')).toContain('Usage: git-me user <add|delete>');
     expect(testIO.err).toEqual([]);
   });
 
@@ -107,5 +125,49 @@ describe('runCli', () => {
     ], testIO)).resolves.toBe(2);
 
     expect(testIO.err.join('')).toContain('invalid --source-header');
+  });
+
+  test('adds admin-managed user', async () => {
+    const testIO = io();
+
+    await expect(runCli([
+      'user', 'add',
+      '--target', 'https://worker.example',
+      '--token', 'admin',
+      '--username', 'alice',
+      '--password', 'secret-password',
+      '--access', 'write',
+    ], testIO)).resolves.toBe(0);
+
+    expect(testIO.userCalls).toEqual([{ action: 'add', targetUrl: 'https://worker.example', token: 'admin', username: 'alice', password: 'secret-password', access: 'write' }]);
+    expect(testIO.out.join('')).toBe('username=alice access=write\n');
+  });
+
+  test('deletes admin-managed user', async () => {
+    const testIO = io();
+
+    await expect(runCli([
+      'user', 'delete',
+      '--target', 'https://worker.example',
+      '--token', 'admin',
+      '--username', 'alice',
+    ], testIO)).resolves.toBe(0);
+
+    expect(testIO.userCalls).toEqual([{ action: 'delete', targetUrl: 'https://worker.example', token: 'admin', username: 'alice', password: undefined, access: undefined }]);
+    expect(testIO.out.join('')).toBe('username=alice deleted=true\n');
+  });
+
+  test('rejects user add without access', async () => {
+    const testIO = io();
+
+    await expect(runCli([
+      'user', 'add',
+      '--target', 'https://worker.example',
+      '--token', 'admin',
+      '--username', 'alice',
+      '--password', 'secret-password',
+    ], testIO)).resolves.toBe(2);
+
+    expect(testIO.err.join('')).toContain('missing required option: --access read|write');
   });
 });

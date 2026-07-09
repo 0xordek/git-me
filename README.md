@@ -77,17 +77,21 @@ npm run deploy
 Create a user as the deploy admin:
 
 ```bash
-curl -X PUT https://your-worker.workers.dev/admin/users/alice \
-  -H "Authorization: Bearer <admin-token>" \
-  -H "Content-Type: application/json" \
-  -d '{"password":"<strong-password>","access":"write"}'
+npx git-me user add \
+  --target https://your-worker.workers.dev \
+  --token <admin-token> \
+  --username alice \
+  --password <strong-password> \
+  --access write
 ```
 
 Use `"read"` for pull-only users and `"write"` for pull/push users. Delete access with:
 
 ```bash
-curl -X DELETE https://your-worker.workers.dev/admin/users/alice \
-  -H "Authorization: Bearer <admin-token>"
+npx git-me user delete \
+  --target https://your-worker.workers.dev \
+  --token <admin-token> \
+  --username alice
 ```
 
 Configure a repo:
@@ -111,6 +115,8 @@ git commit -m "chore: configure git-me lfs"
 Then use `git push` and `git pull` as normal. On first LFS access, Git asks for username and password. Git Credential Manager stores it on the machine, so deleting and cloning the repo again usually does not ask while the worker host stays the same.
 
 The admin bearer token also works for LFS as an emergency write credential, but normal users should use Basic auth users created through `/admin/users/{username}`.
+
+If you do not want the CLI, the same operations are available through `PUT` and `DELETE /admin/users/{username}`.
 
 ## Migrating Existing LFS Objects
 

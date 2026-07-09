@@ -261,10 +261,33 @@ async function runCli(argv, io = {}) {
   }
   const [command, ...args] = argv;
   if (command === "migrate") return await runMigrate(args, { ...io, stdout: out, stderr: err });
+  if (command === "user") return await runUser(args, { ...io, stdout: out, stderr: err });
   err(`unknown command: ${command}
 
 ${topLevelUsage()}`);
   return 2;
+}
+async function runUser(args, io) {
+  if (args.includes("--help") || args.includes("-h")) {
+    io.stdout(userUsage());
+    return 0;
+  }
+  const parsed = parseUserArgs(args);
+  if ("error" in parsed) {
+    io.stderr(`${parsed.error}
+
+${userUsage()}`);
+    return 2;
+  }
+  try {
+    const result = await (io.userRequest ?? requestUser)(parsed.options);
+    io.stdout(formatUserResult(result));
+    return 0;
+  } catch (error) {
+    io.stderr(`${error instanceof Error ? error.message : String(error)}
+`);
+    return 1;
+  }
 }
 async function runMigrate(args, io) {
   if (args.includes("--help") || args.includes("-h")) {
@@ -287,6 +310,47 @@ ${migrateUsage()}`);
 `);
     return 1;
   }
+}
+function parseUserArgs(args) {
+  const action = args[0];
+  if (action !== "add" && action !== "delete") return { error: "missing user action: add or delete" };
+  let targetUrl = "";
+  let token = "";
+  let username = "";
+  let password = "";
+  let access = "";
+  for (let index = 1; index < args.length; index += 1) {
+    const arg = args[index];
+    const value = args[index + 1];
+    if (!value || value.startsWith("--")) return { error: `missing value for ${arg}` };
+    index += 1;
+    if (arg === "--target") targetUrl = value;
+    else if (arg === "--token") token = value;
+    else if (arg === "--username") username = value;
+    else if (arg === "--password") password = value;
+    else if (arg === "--access") access = value;
+    else return { error: `unknown option: ${arg}` };
+  }
+  if (!targetUrl) return { error: "missing required option: --target" };
+  if (!token) return { error: "missing required option: --token" };
+  if (!username) return { error: "missing required option: --username" };
+  if (action === "add" && !password) return { error: "missing required option: --password" };
+  if (action === "add" && access !== "read" && access !== "write") return { error: "missing required option: --access read|write" };
+  return { options: { action, targetUrl, token, username, password: password || void 0, access: access || void 0 } };
+}
+async function requestUser(options) {
+  const url = new URL(`/admin/users/${encodeURIComponent(options.username)}`, options.targetUrl.endsWith("/") ? options.targetUrl : `${options.targetUrl}/`);
+  const res = await fetch(url, {
+    method: options.action === "add" ? "PUT" : "DELETE",
+    headers: {
+      Authorization: `Bearer ${options.token}`,
+      ...options.action === "add" ? { "Content-Type": "application/json" } : {}
+    },
+    body: options.action === "add" ? JSON.stringify({ password: options.password, access: options.access }) : void 0
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(text.trim() || `request failed: ${res.status}`);
+  return JSON.parse(text);
 }
 function parseMigrateArgs(args, defaultRepoPath) {
   const sourceHeaders = {};
@@ -339,6 +403,7 @@ function topLevelUsage() {
 
 Commands:
   migrate  migrate Git LFS objects to git-me
+  user     manage git-me LFS users
 `;
 }
 function migrateUsage() {
@@ -353,10 +418,24 @@ Options:
   --write-config                update lfs.url after successful migration
 `;
 }
+function userUsage() {
+  return `Usage: git-me user <add|delete> --target <url> --token <admin-token> --username <name> [options]
+
+Options:
+  --password <password>  password for add
+  --access <read|write>  access for add
+`;
+}
 function formatResult(result) {
   const lines = [`scanned=${result.scanned} unique=${result.unique} migrated=${result.migrated} skipped=${result.skipped} failed=${result.failed.length}`];
   for (const failure of result.failed) lines.push(`${failure.oid}: ${failure.reason}`);
   return `${lines.join("\n")}
+`;
+}
+function formatUserResult(result) {
+  if (result.deleted) return `username=${result.username} deleted=true
+`;
+  return `username=${result.username} access=${result.access}
 `;
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

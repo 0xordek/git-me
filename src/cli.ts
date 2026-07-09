@@ -7,6 +7,24 @@ export type CliIO = {
   stderr?: (text: string) => void;
   cwd?: () => string;
   migrate?: (options: MigrateOptions) => Promise<MigrationResult>;
+  userRequest?: (options: UserOptions) => Promise<UserResult>;
+};
+
+type UserAccess = 'read' | 'write';
+
+type UserOptions = {
+  action: 'add' | 'delete';
+  targetUrl: string;
+  token: string;
+  username: string;
+  password?: string;
+  access?: UserAccess;
+};
+
+type UserResult = {
+  username: string;
+  access?: UserAccess;
+  deleted?: boolean;
 };
 
 export async function runCli(argv: string[], io: CliIO = {}): Promise<number> {
@@ -20,9 +38,32 @@ export async function runCli(argv: string[], io: CliIO = {}): Promise<number> {
 
   const [command, ...args] = argv;
   if (command === 'migrate') return await runMigrate(args, { ...io, stdout: out, stderr: err });
+  if (command === 'user') return await runUser(args, { ...io, stdout: out, stderr: err });
 
   err(`unknown command: ${command}\n\n${topLevelUsage()}`);
   return 2;
+}
+
+async function runUser(args: string[], io: Required<Pick<CliIO, 'stdout' | 'stderr'>> & CliIO): Promise<number> {
+  if (args.includes('--help') || args.includes('-h')) {
+    io.stdout(userUsage());
+    return 0;
+  }
+
+  const parsed = parseUserArgs(args);
+  if ('error' in parsed) {
+    io.stderr(`${parsed.error}\n\n${userUsage()}`);
+    return 2;
+  }
+
+  try {
+    const result = await (io.userRequest ?? requestUser)(parsed.options);
+    io.stdout(formatUserResult(result));
+    return 0;
+  } catch (error) {
+    io.stderr(`${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
 }
 
 async function runMigrate(args: string[], io: Required<Pick<CliIO, 'stdout' | 'stderr'>> & CliIO): Promise<number> {
@@ -45,6 +86,54 @@ async function runMigrate(args: string[], io: Required<Pick<CliIO, 'stdout' | 's
     io.stderr(`${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
   }
+}
+
+function parseUserArgs(args: string[]): { options: UserOptions } | { error: string } {
+  const action = args[0];
+  if (action !== 'add' && action !== 'delete') return { error: 'missing user action: add or delete' };
+
+  let targetUrl = '';
+  let token = '';
+  let username = '';
+  let password = '';
+  let access = '';
+
+  for (let index = 1; index < args.length; index += 1) {
+    const arg = args[index];
+    const value = args[index + 1];
+    if (!value || value.startsWith('--')) return { error: `missing value for ${arg}` };
+    index += 1;
+
+    if (arg === '--target') targetUrl = value;
+    else if (arg === '--token') token = value;
+    else if (arg === '--username') username = value;
+    else if (arg === '--password') password = value;
+    else if (arg === '--access') access = value;
+    else return { error: `unknown option: ${arg}` };
+  }
+
+  if (!targetUrl) return { error: 'missing required option: --target' };
+  if (!token) return { error: 'missing required option: --token' };
+  if (!username) return { error: 'missing required option: --username' };
+  if (action === 'add' && !password) return { error: 'missing required option: --password' };
+  if (action === 'add' && access !== 'read' && access !== 'write') return { error: 'missing required option: --access read|write' };
+
+  return { options: { action, targetUrl, token, username, password: password || undefined, access: access as UserAccess || undefined } };
+}
+
+async function requestUser(options: UserOptions): Promise<UserResult> {
+  const url = new URL(`/admin/users/${encodeURIComponent(options.username)}`, options.targetUrl.endsWith('/') ? options.targetUrl : `${options.targetUrl}/`);
+  const res = await fetch(url, {
+    method: options.action === 'add' ? 'PUT' : 'DELETE',
+    headers: {
+      Authorization: `Bearer ${options.token}`,
+      ...(options.action === 'add' ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: options.action === 'add' ? JSON.stringify({ password: options.password, access: options.access }) : undefined,
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(text.trim() || `request failed: ${res.status}`);
+  return JSON.parse(text) as UserResult;
 }
 
 function parseMigrateArgs(args: string[], defaultRepoPath: string): { options: MigrateOptions } | { error: string } {
@@ -101,17 +190,26 @@ function parseHeader(input: string): { name: string; value: string } | null {
 }
 
 function topLevelUsage(): string {
-  return `Usage: git-me <command>\n\nCommands:\n  migrate  migrate Git LFS objects to git-me\n`;
+  return `Usage: git-me <command>\n\nCommands:\n  migrate  migrate Git LFS objects to git-me\n  user     manage git-me LFS users\n`;
 }
 
 function migrateUsage(): string {
   return `Usage: git-me migrate --target <url> --token <token> [options]\n\nOptions:\n  --repo <path>                 repository path (default: current directory)\n  --source-url <url>            source LFS URL (default: git config lfs.url)\n  --source-header <name: value> source LFS header, repeatable\n  --concurrency <number>        concurrent transfers, 1..16 (default: 4)\n  --dry-run                     scan without transferring objects\n  --write-config                update lfs.url after successful migration\n`;
 }
 
+function userUsage(): string {
+  return `Usage: git-me user <add|delete> --target <url> --token <admin-token> --username <name> [options]\n\nOptions:\n  --password <password>  password for add\n  --access <read|write>  access for add\n`;
+}
+
 function formatResult(result: MigrationResult): string {
   const lines = [`scanned=${result.scanned} unique=${result.unique} migrated=${result.migrated} skipped=${result.skipped} failed=${result.failed.length}`];
   for (const failure of result.failed) lines.push(`${failure.oid}: ${failure.reason}`);
   return `${lines.join('\n')}\n`;
+}
+
+function formatUserResult(result: UserResult): string {
+  if (result.deleted) return `username=${result.username} deleted=true\n`;
+  return `username=${result.username} access=${result.access}\n`;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
