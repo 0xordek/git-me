@@ -25,15 +25,15 @@
     "dist/cli.js"
   ],
   "scripts": {
-    "build": "wrangler deploy --dry-run --outdir dist --metafile dist/bundle-meta.json",
+    "build": "wrangler deploy --dry-run --config wrangler.example.toml --outdir dist --metafile dist/bundle-meta.json",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "build:cli": "esbuild src/cli.ts --bundle --platform=node --format=esm --outfile=dist/cli.js --banner:js=\"#!/usr/bin/env node\"",
     "check": "npm test && npm run typecheck && npm run build:cli && git diff --exit-code -- dist/cli.js && npm pack --dry-run && npm run deploy:dry",
-    "deploy:dry": "wrangler deploy --dry-run",
-    "deploy": "wrangler deploy",
-    "version:upload": "wrangler versions upload",
-    "version:deploy": "wrangler versions deploy"
+    "deploy:dry": "wrangler deploy --dry-run --config wrangler.example.toml",
+    "deploy": "wrangler deploy --config wrangler.local.toml",
+    "version:upload": "wrangler versions upload --config wrangler.local.toml",
+    "version:deploy": "wrangler versions deploy --config wrangler.local.toml"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260702.1",

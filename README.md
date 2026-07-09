@@ -28,9 +28,13 @@ wrangler r2 bucket create git-me-objects
 wrangler kv namespace create git-me-metadata
 ```
 
-Wrangler prints the KV namespace id. Add it to `wrangler.toml` as `id = "..."` under `[[kv_namespaces]]` if your Wrangler version does not auto-provision or write the id for you.
+Wrangler prints the KV namespace id. Create private deployment config, then replace its placeholder ID:
 
-Before a real deploy, replace the placeholder KV namespace id in `wrangler.toml` with the real KV namespace id from Cloudflare. `npm run deploy` creates the `AuthUser` Durable Object migration.
+```bash
+cp wrangler.example.toml wrangler.local.toml
+```
+
+`wrangler.local.toml` is ignored by Git. Before a real deploy, replace its placeholder KV namespace ID with your namespace ID. `npm run deploy` creates the `AuthUser` Durable Object migration.
 
 Set the admin token as a secret:
 
@@ -218,7 +222,7 @@ Batch requests and error responses use `application/vnd.git-lfs+json`.
 ```bash
 npm ci
 npm run check
-wrangler dev
+wrangler dev --config wrangler.local.toml
 ```
 
 ## Security

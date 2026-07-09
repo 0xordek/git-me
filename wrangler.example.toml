@@ -9,6 +9,7 @@ bucket_name = "git-me-objects"
 
 [[kv_namespaces]]
 binding = "GITME_KV"
+# Copy this file to wrangler.local.toml and replace before deployment.
 id = "00000000000000000000000000000000"
 
 [[durable_objects.bindings]]
