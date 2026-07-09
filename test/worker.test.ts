@@ -77,6 +77,10 @@ function authHeaders(extra: Record<string, string> = {}): Record<string, string>
   return { Authorization: 'Bearer tok', ...extra };
 }
 
+function basicHeaders(username: string, password: string, extra: Record<string, string> = {}): Record<string, string> {
+  return { Authorization: 'Basic ' + btoa(`${username}:${password}`), ...extra };
+}
+
 function signedUrlParams(url: string): URLSearchParams {
   return new URL(url).searchParams;
 }
@@ -394,7 +398,55 @@ describe('worker', () => {
 
     expect(res.status).toBe(401);
     expect(res.headers.get('Content-Type')).toBe('application/vnd.git-lfs+json');
+    expect(res.headers.get('WWW-Authenticate')).toBe('Basic realm="git-me"');
     expect(body.message).toBe('authentication required');
+  });
+
+  test('admin creates user and basic auth can upload', async () => {
+    const e = env();
+    const create = await worker.fetch(new Request('https://example.com/admin/users/alice', {
+      method: 'PUT',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ password: 'correct horse', access: 'write' }),
+    }), e, {} as ExecutionContext);
+    const req = new Request('https://example.com/objects/batch', {
+      method: 'POST',
+      headers: basicHeaders('alice', 'correct horse', { 'Content-Type': 'application/vnd.git-lfs+json' }),
+      body: JSON.stringify({ operation: 'upload', transfers: ['basic'], objects: [{ oid, size: 1 }] }),
+    });
+
+    const res = await worker.fetch(req, e, {} as ExecutionContext);
+    const record = JSON.parse((await e.GITME_KV.get('user:alice')) || '{}') as { password_sha256: string; password?: string };
+
+    expect(create.status).toBe(200);
+    expect(record.password).toBeUndefined();
+    expect(record.password_sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(res.status).toBe(200);
+  });
+
+  test('read user can download but cannot upload', async () => {
+    const e = env();
+    await worker.fetch(new Request('https://example.com/admin/users/bob', {
+      method: 'PUT',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ password: 'correct horse', access: 'read' }),
+    }), e, {} as ExecutionContext);
+    await e.GITME_R2.put('objects/' + oid, 'x');
+    await e.GITME_KV.put('object:' + oid, JSON.stringify({ oid, size: 1, created_at: new Date().toISOString(), uploaded: true }));
+
+    const upload = await worker.fetch(new Request('https://example.com/objects/batch', {
+      method: 'POST',
+      headers: basicHeaders('bob', 'correct horse', { 'Content-Type': 'application/vnd.git-lfs+json' }),
+      body: JSON.stringify({ operation: 'upload', transfers: ['basic'], objects: [{ oid, size: 1 }] }),
+    }), e, {} as ExecutionContext);
+    const download = await worker.fetch(new Request('https://example.com/objects/batch', {
+      method: 'POST',
+      headers: basicHeaders('bob', 'correct horse', { 'Content-Type': 'application/vnd.git-lfs+json' }),
+      body: JSON.stringify({ operation: 'download', transfers: ['basic'], objects: [{ oid, size: 1 }] }),
+    }), e, {} as ExecutionContext);
+
+    expect(upload.status).toBe(403);
+    expect(download.status).toBe(200);
   });
 
   test('hash mismatch does not write KV metadata', async () => {

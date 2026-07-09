@@ -6,7 +6,7 @@ Built as a TypeScript Cloudflare Worker.
 
 ## Requirements
 
-- Node.js 20+
+- Node.js 22+
 - Wrangler CLI or project-local `wrangler`
 - Cloudflare account with Workers, R2, and KV enabled
 
@@ -34,7 +34,7 @@ Wrangler prints the KV namespace id. Add it to `wrangler.toml` as `id = "..."` u
 
 Before a real deploy, replace the placeholder KV namespace id in `wrangler.toml` with the real KV namespace id from Cloudflare.
 
-Set the auth token as a secret:
+Set the admin token as a secret:
 
 ```bash
 wrangler secret put GITME_AUTH_TOKEN
@@ -51,7 +51,7 @@ Leave `GITME_TRANSFER_MODE` unset for `proxy`, or set it to `direct` to opt in t
 
 | Name | Required | Purpose |
 |------|----------|---------|
-| `GITME_AUTH_TOKEN` | Yes | Bearer token expected from Git LFS clients |
+| `GITME_AUTH_TOKEN` | Yes | Admin bearer token for user management and emergency LFS access |
 | `GITME_TRANSFER_MODE` | No | `proxy` by default; set `direct` for signed R2 URLs |
 | `GITME_SIGNED_URL_TTL_SECONDS` | No | Signed URL TTL for `direct` mode; defaults to `900` |
 | `GITME_R2_ACCOUNT_ID` | Direct mode | Cloudflare account id for R2 S3-compatible signing |
@@ -74,16 +74,33 @@ npm run deploy
 
 ## Git LFS Client Setup
 
+Create a user as the deploy admin:
+
+```bash
+curl -X PUT https://your-worker.workers.dev/admin/users/alice \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"password":"<strong-password>","access":"write"}'
+```
+
+Use `"read"` for pull-only users and `"write"` for pull/push users. Delete access with:
+
+```bash
+curl -X DELETE https://your-worker.workers.dev/admin/users/alice \
+  -H "Authorization: Bearer <admin-token>"
+```
+
+Configure a repo:
+
 ```bash
 git lfs track "*.psd" "*.zip" "*.bin"
 git add .gitattributes
 
 git config lfs.url https://your-worker.workers.dev
-git config http.https://your-worker.workers.dev.extraheader "Authorization: Bearer <token>"
 git config lfs.http.https://your-worker.workers.dev.locksverify false
 ```
 
-Then use `git push` and `git pull` as normal.
+Then use `git push` and `git pull` as normal. On first LFS access, Git asks for username and password. Git Credential Manager stores it on the machine, so deleting and cloning the repo again usually does not ask while the worker host stays the same.
 
 ## Migrating Existing LFS Objects
 
@@ -144,6 +161,8 @@ Safety model: the CLI uses the generic Git LFS Batch API for source downloads an
 | POST | `/objects/batch` | Git LFS Batch API |
 | PUT | `/objects/{oid}` | Upload object bytes |
 | GET | `/objects/{oid}` | Download object bytes |
+| PUT | `/admin/users/{username}` | Create or update LFS user |
+| DELETE | `/admin/users/{username}` | Delete LFS user |
 | GET | `/health` | Configuration health check |
 
 Batch requests and error responses use `application/vnd.git-lfs+json`.

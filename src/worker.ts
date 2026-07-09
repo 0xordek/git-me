@@ -5,7 +5,9 @@ import { presignR2Url } from './signing';
 const LFS_CONTENT_TYPE = 'application/vnd.git-lfs+json';
 const OBJECT_PREFIX = 'objects/';
 const META_PREFIX = 'object:';
+const USER_PREFIX = 'user:';
 const OID_RE = /^[0-9a-fA-F]{64}$/;
+const USERNAME_RE = /^[a-z0-9][a-z0-9_.-]{0,62}$/;
 
 export interface Env {
   GITME_AUTH_TOKEN?: string;
@@ -44,6 +46,14 @@ type DigestResult = {
   size: number;
 };
 
+type UserAccess = 'read' | 'write';
+
+type UserRecord = {
+  password_sha256: string;
+  access: UserAccess;
+  created_at: string;
+};
+
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     try {
@@ -59,18 +69,23 @@ export default {
         if (error instanceof ConfigError) return lfsError(500, 'configuration error');
         throw error;
       }
-      const auth = request.headers.get('Authorization') || '';
-      if (auth !== `Bearer ${config.authToken}`) {
-        return lfsError(401, 'authentication required');
-      }
+      if (url.pathname.startsWith('/admin/users/')) return handleAdminUser(request, env, config, url.pathname.slice('/admin/users/'.length));
 
       if (url.pathname === '/objects/batch') {
         return handleBatch(request, env, config);
       }
       if (url.pathname.startsWith('/objects/')) {
         const oid = url.pathname.slice('/objects/'.length);
-        if (request.method === 'PUT') return handleUpload(request, env, oid);
-        if (request.method === 'GET') return handleDownload(env, oid);
+        if (request.method === 'PUT') {
+          const auth = await requireLfsAccess(request, env, config, 'write');
+          if (auth) return auth;
+          return handleUpload(request, env, oid);
+        }
+        if (request.method === 'GET') {
+          const auth = await requireLfsAccess(request, env, config, 'read');
+          if (auth) return auth;
+          return handleDownload(env, oid);
+        }
         return lfsError(405, 'method not allowed');
       }
       return new Response('not found\n', { status: 404 });
@@ -82,6 +97,8 @@ export default {
 
 async function handleBatch(request: Request, env: Env, config: AppConfig): Promise<Response> {
   if (request.method !== 'POST') return lfsError(405, 'method not allowed');
+  const auth = await authenticateLfs(request, env, config);
+  if ('response' in auth) return auth.response;
   if (!isLfsContentType(request.headers.get('Content-Type'))) {
     return lfsError(415, 'content type must be ' + LFS_CONTENT_TYPE);
   }
@@ -98,6 +115,7 @@ async function handleBatch(request: Request, env: Env, config: AppConfig): Promi
   if (!isLfsOperation(body.operation)) {
     return lfsError(400, 'lfs: unknown batch operation: ' + body.operation);
   }
+  if (!canAccess(auth.access, body.operation === 'upload' ? 'write' : 'read')) return lfsError(403, 'forbidden');
   if (!Array.isArray(body.objects)) return lfsError(400, 'objects must be an array');
 
   const objects: LfsBatchObject[] = [];
@@ -207,6 +225,34 @@ async function handleUpload(request: Request, env: Env, oid: string): Promise<Re
   return new Response(null, { status: 200 });
 }
 
+async function handleAdminUser(request: Request, env: Env, config: AppConfig, rawUsername: string): Promise<Response> {
+  if (request.headers.get('Authorization') !== `Bearer ${config.authToken}`) return appJson(401, { message: 'authentication required' });
+  const username = normalizeUsername(decodeURIComponent(rawUsername));
+  if (!username) return appJson(400, { message: 'invalid username' });
+
+  if (request.method === 'PUT') {
+    let body: { password?: unknown; access?: unknown };
+    try {
+      body = await request.json() as { password?: unknown; access?: unknown };
+    } catch {
+      return appJson(400, { message: 'invalid JSON' });
+    }
+    if (typeof body.password !== 'string' || body.password.length < 8) return appJson(400, { message: 'password must be at least 8 characters' });
+    const access = body.access === 'read' || body.access === 'write' ? body.access : '';
+    if (!access) return appJson(400, { message: 'access must be read or write' });
+    const record: UserRecord = { password_sha256: await sha256Hex(body.password), access, created_at: new Date().toISOString() };
+    await env.GITME_KV.put(USER_PREFIX + username, JSON.stringify(record));
+    return appJson(200, { username, access });
+  }
+
+  if (request.method === 'DELETE') {
+    await env.GITME_KV.delete(USER_PREFIX + username);
+    return appJson(200, { username, deleted: true });
+  }
+
+  return appJson(405, { message: 'method not allowed' });
+}
+
 async function handleDownload(env: Env, oid: string): Promise<Response> {
   if (!OID_RE.test(oid)) return lfsError(400, 'invalid oid');
   const metaText = await env.GITME_KV.get(META_PREFIX + oid);
@@ -263,6 +309,58 @@ function lfsError(status: number, message: string): Response {
   return json(status, { message });
 }
 
+function lfsAuthError(): Response {
+  const res = lfsError(401, 'authentication required');
+  res.headers.set('WWW-Authenticate', 'Basic realm="git-me"');
+  return res;
+}
+
+function appJson(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body) + '\n', { status, headers: { 'Content-Type': 'application/json' } });
+}
+
+async function requireLfsAccess(request: Request, env: Env, config: AppConfig, needed: UserAccess): Promise<Response | null> {
+  const auth = await authenticateLfs(request, env, config);
+  if ('response' in auth) return auth.response;
+  return canAccess(auth.access, needed) ? null : lfsError(403, 'forbidden');
+}
+
+async function authenticateLfs(request: Request, env: Env, config: AppConfig): Promise<{ access: UserAccess } | { response: Response }> {
+  const auth = request.headers.get('Authorization') || '';
+  if (auth === `Bearer ${config.authToken}`) return { access: 'write' };
+  if (!auth.startsWith('Basic ')) return { response: lfsAuthError() };
+
+  const credentials = decodeBasicAuth(auth.slice('Basic '.length));
+  if (!credentials) return { response: lfsAuthError() };
+  const username = normalizeUsername(credentials.username);
+  if (!username) return { response: lfsAuthError() };
+
+  const rawRecord = await env.GITME_KV.get(USER_PREFIX + username);
+  const record = rawRecord ? JSON.parse(rawRecord) as UserRecord : null;
+  if (!record || await sha256Hex(credentials.password) !== record.password_sha256) return { response: lfsAuthError() };
+  return { access: record.access };
+}
+
+function decodeBasicAuth(encoded: string): { username: string; password: string } | null {
+  try {
+    const decoded = atob(encoded);
+    const separator = decoded.indexOf(':');
+    if (separator < 1) return null;
+    return { username: decoded.slice(0, separator), password: decoded.slice(separator + 1) };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeUsername(username: string): string {
+  const normalized = username.trim().toLowerCase();
+  return USERNAME_RE.test(normalized) ? normalized : '';
+}
+
+function canAccess(actual: UserAccess, needed: UserAccess): boolean {
+  return actual === 'write' || needed === 'read';
+}
+
 async function digestAndCount(stream: ReadableStream<Uint8Array>): Promise<DigestResult> {
   if (typeof DigestStream === 'function') {
     let size = 0;
@@ -281,6 +379,11 @@ async function digestAndCount(stream: ReadableStream<Uint8Array>): Promise<Diges
   const buffer = await new Response(stream).arrayBuffer();
   const digest = await crypto.subtle.digest('SHA-256', buffer);
   return { hex: bytesToHex(new Uint8Array(digest)), size: buffer.byteLength };
+}
+
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return bytesToHex(new Uint8Array(digest));
 }
 
 function bytesToHex(bytes: Uint8Array): string {
