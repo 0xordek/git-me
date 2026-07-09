@@ -6,6 +6,8 @@ export type CliIO = {
   stdout?: (text: string) => void;
   stderr?: (text: string) => void;
   cwd?: () => string;
+  env?: Record<string, string | undefined>;
+  readStdin?: () => Promise<string>;
   migrate?: (options: MigrateOptions) => Promise<MigrationResult>;
   userRequest?: (options: UserOptions) => Promise<UserResult>;
 };
@@ -26,6 +28,8 @@ type UserResult = {
   access?: UserAccess;
   deleted?: boolean;
 };
+
+type SecretSource = { env: string } | { stdin: true };
 
 export async function runCli(argv: string[], io: CliIO = {}): Promise<number> {
   const out = io.stdout ?? ((text) => process.stdout.write(text));
@@ -50,7 +54,7 @@ async function runUser(args: string[], io: Required<Pick<CliIO, 'stdout' | 'stde
     return 0;
   }
 
-  const parsed = parseUserArgs(args);
+  const parsed = await parseUserArgs(args, io);
   if ('error' in parsed) {
     io.stderr(`${parsed.error}\n\n${userUsage()}`);
     return 2;
@@ -72,7 +76,7 @@ async function runMigrate(args: string[], io: Required<Pick<CliIO, 'stdout' | 's
     return 0;
   }
 
-  const parsed = parseMigrateArgs(args, io.cwd?.() ?? process.cwd());
+  const parsed = await parseMigrateArgs(args, io.cwd?.() ?? process.cwd(), io);
   if ('error' in parsed) {
     io.stderr(`${parsed.error}\n\n${migrateUsage()}`);
     return 2;
@@ -88,37 +92,71 @@ async function runMigrate(args: string[], io: Required<Pick<CliIO, 'stdout' | 's
   }
 }
 
-function parseUserArgs(args: string[]): { options: UserOptions } | { error: string } {
+async function parseUserArgs(args: string[], io: CliIO): Promise<{ options: UserOptions } | { error: string }> {
   const action = args[0];
   if (action !== 'add' && action !== 'delete') return { error: 'missing user action: add or delete' };
 
   let targetUrl = '';
-  let token = '';
+  let token: SecretSource | undefined;
   let username = '';
-  let password = '';
+  let password: SecretSource | undefined;
   let access = '';
 
   for (let index = 1; index < args.length; index += 1) {
     const arg = args[index];
+    if (arg === '--token-stdin') {
+      if (token) return { error: 'duplicate token source' };
+      token = { stdin: true };
+      continue;
+    }
+    if (arg === '--password-stdin') {
+      if (password) return { error: 'duplicate password source' };
+      password = { stdin: true };
+      continue;
+    }
     const value = args[index + 1];
     if (!value || value.startsWith('--')) return { error: `missing value for ${arg}` };
     index += 1;
 
     if (arg === '--target') targetUrl = value;
-    else if (arg === '--token') token = value;
+    else if (arg === '--token-env') {
+      if (token) return { error: 'duplicate token source' };
+      const source = envSecret(value);
+      if (!source) return { error: `invalid environment variable name: ${value}` };
+      token = source;
+    }
     else if (arg === '--username') username = value;
-    else if (arg === '--password') password = value;
+    else if (arg === '--password-env') {
+      if (password) return { error: 'duplicate password source' };
+      const source = envSecret(value);
+      if (!source) return { error: `invalid environment variable name: ${value}` };
+      password = source;
+    }
     else if (arg === '--access') access = value;
     else return { error: `unknown option: ${arg}` };
   }
 
   if (!targetUrl) return { error: 'missing required option: --target' };
-  if (!token) return { error: 'missing required option: --token' };
+  if (!token) return { error: 'missing required option: --token-env or --token-stdin' };
   if (!username) return { error: 'missing required option: --username' };
-  if (action === 'add' && !password) return { error: 'missing required option: --password' };
+  if (action === 'add' && !password) return { error: 'missing required option: --password-env or --password-stdin' };
   if (action === 'add' && access !== 'read' && access !== 'write') return { error: 'missing required option: --access read|write' };
+  if (isStdinSecret(token) && password && isStdinSecret(password)) return { error: 'only one secret may use standard input' };
 
-  return { options: { action, targetUrl, token, username, password: password || undefined, access: access as UserAccess || undefined } };
+  try {
+    return {
+      options: {
+        action,
+        targetUrl,
+        token: await readSecret(token, io),
+        username,
+        password: password ? await readSecret(password, io) : undefined,
+        access: access as UserAccess || undefined,
+      },
+    };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 async function requestUser(options: UserOptions): Promise<UserResult> {
@@ -136,12 +174,12 @@ async function requestUser(options: UserOptions): Promise<UserResult> {
   return JSON.parse(text) as UserResult;
 }
 
-function parseMigrateArgs(args: string[], defaultRepoPath: string): { options: MigrateOptions } | { error: string } {
-  const sourceHeaders: HeaderMap = {};
+async function parseMigrateArgs(args: string[], defaultRepoPath: string, io: CliIO): Promise<{ options: MigrateOptions } | { error: string }> {
+  const sourceHeaderSources: SecretSource[] = [];
   let repoPath = defaultRepoPath;
   let sourceUrl: string | undefined;
   let targetUrl: string | undefined;
-  let targetToken: string | undefined;
+  let targetToken: SecretSource | undefined;
   let concurrency = 4;
   let dryRun = false;
   let writeConfig = false;
@@ -156,6 +194,11 @@ function parseMigrateArgs(args: string[], defaultRepoPath: string): { options: M
       writeConfig = true;
       continue;
     }
+    if (arg === '--token-stdin') {
+      if (targetToken) return { error: 'duplicate token source' };
+      targetToken = { stdin: true };
+      continue;
+    }
 
     const value = args[index + 1];
     if (!value || value.startsWith('--')) return { error: `missing value for ${arg}` };
@@ -164,21 +207,62 @@ function parseMigrateArgs(args: string[], defaultRepoPath: string): { options: M
     if (arg === '--repo') repoPath = value;
     else if (arg === '--source-url') sourceUrl = value;
     else if (arg === '--target') targetUrl = value;
-    else if (arg === '--token') targetToken = value;
+    else if (arg === '--token-env') {
+      if (targetToken) return { error: 'duplicate token source' };
+      const source = envSecret(value);
+      if (!source) return { error: `invalid environment variable name: ${value}` };
+      targetToken = source;
+    }
     else if (arg === '--concurrency') {
       concurrency = Number(value);
       if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16) return { error: 'invalid --concurrency' };
-    } else if (arg === '--source-header') {
-      const header = parseHeader(value);
-      if (!header) return { error: 'invalid --source-header' };
-      sourceHeaders[header.name] = header.value;
+    } else if (arg === '--source-header-env') {
+      const source = envSecret(value);
+      if (!source) return { error: `invalid environment variable name: ${value}` };
+      sourceHeaderSources.push(source);
     } else return { error: `unknown option: ${arg}` };
   }
 
   if (!targetUrl) return { error: 'missing required option: --target' };
-  if (!targetToken) return { error: 'missing required option: --token' };
+  if (!targetToken) return { error: 'missing required option: --token-env or --token-stdin' };
 
-  return { options: { repoPath, sourceUrl, sourceHeaders, targetUrl, targetToken, concurrency, dryRun, writeConfig } };
+  try {
+    const sourceHeaders: HeaderMap = {};
+    for (const source of sourceHeaderSources) {
+      const header = parseHeader(await readSecret(source, io));
+      if (!header) return { error: 'invalid --source-header-env value' };
+      sourceHeaders[header.name] = header.value;
+    }
+    return { options: { repoPath, sourceUrl, sourceHeaders, targetUrl, targetToken: await readSecret(targetToken, io), concurrency, dryRun, writeConfig } };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function envSecret(name: string): SecretSource | null {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? { env: name } : null;
+}
+
+function isStdinSecret(source: SecretSource): source is { stdin: true } {
+  return 'stdin' in source;
+}
+
+async function readSecret(source: SecretSource, io: CliIO): Promise<string> {
+  if ('env' in source) {
+    const value = (io.env ?? process.env)[source.env];
+    if (!value) throw new Error(`missing environment variable: ${source.env}`);
+    return value;
+  }
+  const value = await (io.readStdin ?? readStdin)();
+  const secret = value.replace(/\r?\n$/, '');
+  if (!secret) throw new Error('standard input secret is empty');
+  return secret;
+}
+
+async function readStdin(): Promise<string> {
+  let value = '';
+  for await (const chunk of process.stdin) value += String(chunk);
+  return value;
 }
 
 function parseHeader(input: string): { name: string; value: string } | null {
@@ -194,11 +278,11 @@ function topLevelUsage(): string {
 }
 
 function migrateUsage(): string {
-  return `Usage: git-me migrate --target <url> --token <token> [options]\n\nOptions:\n  --repo <path>                 repository path (default: current directory)\n  --source-url <url>            source LFS URL (default: git config lfs.url)\n  --source-header <name: value> source LFS header, repeatable\n  --concurrency <number>        concurrent transfers, 1..16 (default: 4)\n  --dry-run                     scan without transferring objects\n  --write-config                update lfs.url after successful migration\n`;
+  return `Usage: git-me migrate --target <url> (--token-env <name>|--token-stdin) [options]\n\nOptions:\n  --repo <path>                  repository path (default: current directory)\n  --source-url <url>             source LFS URL (default: git config lfs.url)\n  --source-header-env <name>     env var containing name: value, repeatable\n  --concurrency <number>         concurrent transfers, 1..16 (default: 4)\n  --dry-run                      scan without transferring objects\n  --write-config                 update lfs.url after successful migration\n`;
 }
 
 function userUsage(): string {
-  return `Usage: git-me user <add|delete> --target <url> --token <admin-token> --username <name> [options]\n\nOptions:\n  --password <password>  password for add\n  --access <read|write>  access for add\n`;
+  return `Usage: git-me user <add|delete> --target <url> (--token-env <name>|--token-stdin) --username <name> [options]\n\nOptions:\n  --password-env <name>  env var containing password for add\n  --password-stdin       read password for add from standard input\n  --access <read|write>  access for add\n`;
 }
 
 function formatResult(result: MigrationResult): string {

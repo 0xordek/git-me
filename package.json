@@ -1,6 +1,22 @@
 {
-  "name": "git-me",
-  "version": "0.2.0",
+  "name": "@0xordek/git-me",
+  "version": "0.3.0",
+  "description": "Self-hosted Git LFS utility for Cloudflare Workers, R2, and Durable Objects.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0xordek/git-me.git"
+  },
+  "homepage": "https://github.com/0xordek/git-me#readme",
+  "bugs": {
+    "url": "https://github.com/0xordek/git-me/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "bin": {
     "git-me": "dist/cli.js"
@@ -13,7 +29,7 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "build:cli": "esbuild src/cli.ts --bundle --platform=node --format=esm --outfile=dist/cli.js --banner:js=\"#!/usr/bin/env node\"",
-    "check": "npm test && npm run typecheck && npm run build:cli && npm run deploy:dry",
+    "check": "npm test && npm run typecheck && npm run build:cli && git diff --exit-code -- dist/cli.js && npm pack --dry-run && npm run deploy:dry",
     "deploy:dry": "wrangler deploy --dry-run",
     "deploy": "wrangler deploy",
     "version:upload": "wrangler versions upload",

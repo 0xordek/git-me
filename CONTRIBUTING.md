@@ -1,6 +1,6 @@
 # Contributing
 
-`git-me` is a small personal utility. Keep changes focused and easy to review.
+`git-me` is a small self-hosted Git LFS utility. Keep changes focused, documented, and easy to review.
 
 ## Setup
 
@@ -14,12 +14,14 @@ npm run check
 ## Guidelines
 
 - Prefer small PRs.
-- Keep Cloudflare runtime code in `src/worker.ts`.
-- Keep behavior covered by tests in `test/worker.test.ts`.
+- Keep routing in `src/worker.ts`, auth state in `src/auth-do.ts`, and CLI behavior in `src/cli.ts`.
+- Keep behavior covered by focused tests beside each component.
 - Never commit secrets. Use `wrangler secret put GITME_AUTH_TOKEN`.
 - Add or update tests for behavior changes.
-- When touching Git LFS batch actions, cover both `proxy` and `direct` transfer behavior.
+- When touching Git LFS batch actions, cover proxy upload plus proxy and direct-download behavior.
+- Do not add secret-valued CLI arguments. Use environment variables or standard input.
 - When touching migration CLI code, run or update the CLI and migration tests in `test/cli.test.ts` and `test/migrate.test.ts`.
+- Update `README.md`, `SECURITY.md`, and `CHANGELOG.md` when public behavior or security changes.
 
 ## Before opening a PR
 
@@ -28,3 +30,5 @@ Run the full pre-PR check set:
 ```bash
 npm run check
 ```
+
+`npm run check` rebuilds `dist/cli.js` and fails when committed output is stale.

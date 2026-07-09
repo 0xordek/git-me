@@ -1,7 +1,7 @@
 import type { R2SigningConfig } from './config';
 
 export type PresignR2UrlInput = {
-  method: 'GET' | 'PUT';
+  method: 'GET';
   key: string;
   expiresSeconds: number;
   signing: R2SigningConfig;

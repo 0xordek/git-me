@@ -10,3 +10,11 @@ bucket_name = "git-me-objects"
 [[kv_namespaces]]
 binding = "GITME_KV"
 id = "00000000000000000000000000000000"
+
+[[durable_objects.bindings]]
+name = "GITME_AUTH"
+class_name = "AuthUser"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AuthUser"]

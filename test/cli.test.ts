@@ -11,6 +11,14 @@ function io(overrides: Partial<CliIO> = {}): CliIO & { out: string[]; err: strin
   const userCalls: UserCall[] = [];
   return {
     cwd: () => '/repo',
+    env: {
+      TOKEN: 'tok',
+      ADMIN_TOKEN: 'admin',
+      PASSWORD: 'secret-password',
+      SOURCE_AUTH: 'Authorization: Bearer source',
+      SOURCE_CUSTOM: 'X-Custom: value',
+      SOURCE_INVALID: 'Authorization=Bearer source',
+    },
     stdout: (text) => out.push(text),
     stderr: (text) => err.push(text),
     migrate: vi.fn(async (options) => {
@@ -54,9 +62,9 @@ describe('runCli', () => {
 
     await expect(runCli(['migrate', '--help'], testIO)).resolves.toBe(0);
 
-    expect(testIO.out.join('')).toContain('Usage: git-me migrate --target <url> --token <token>');
+    expect(testIO.out.join('')).toContain('Usage: git-me migrate --target <url> (--token-env <name>|--token-stdin)');
     expect(testIO.out.join('')).toContain('--source-url <url>');
-    expect(testIO.out.join('')).toContain('--source-header <name: value>');
+    expect(testIO.out.join('')).toContain('--source-header-env <name>');
     expect(testIO.err).toEqual([]);
   });
 
@@ -72,17 +80,17 @@ describe('runCli', () => {
     const missingTarget = io();
     const missingToken = io();
 
-    await expect(runCli(['migrate', '--token', 'tok'], missingTarget)).resolves.toBe(2);
+    await expect(runCli(['migrate', '--token-env', 'TOKEN'], missingTarget)).resolves.toBe(2);
     await expect(runCli(['migrate', '--target', 'https://target.example/lfs'], missingToken)).resolves.toBe(2);
 
     expect(missingTarget.err.join('')).toContain('missing required option: --target');
-    expect(missingToken.err.join('')).toContain('missing required option: --token');
+    expect(missingToken.err.join('')).toContain('missing required option: --token-env or --token-stdin');
   });
 
   test('invalid concurrency exits 2', async () => {
     const testIO = io();
 
-    await expect(runCli(['migrate', '--target', 'https://target.example/lfs', '--token', 'tok', '--concurrency', '0'], testIO)).resolves.toBe(2);
+    await expect(runCli(['migrate', '--target', 'https://target.example/lfs', '--token-env', 'TOKEN', '--concurrency', '0'], testIO)).resolves.toBe(2);
 
     expect(testIO.err.join('')).toContain('invalid --concurrency');
   });
@@ -90,7 +98,7 @@ describe('runCli', () => {
   test('concurrency above 16 exits 2', async () => {
     const testIO = io();
 
-    await expect(runCli(['migrate', '--target', 'https://target.example/lfs', '--token', 'tok', '--concurrency', '17'], testIO)).resolves.toBe(2);
+    await expect(runCli(['migrate', '--target', 'https://target.example/lfs', '--token-env', 'TOKEN', '--concurrency', '17'], testIO)).resolves.toBe(2);
 
     expect(testIO.err.join('')).toContain('invalid --concurrency');
   });
@@ -103,10 +111,10 @@ describe('runCli', () => {
       '--repo', '/work/repo',
       '--source-url', 'https://source.example/lfs',
       '--target', 'https://target.example/lfs',
-      '--token', 'tok',
+      '--token-env', 'TOKEN',
       '--concurrency', '3',
-      '--source-header', 'Authorization: Bearer source',
-      '--source-header', 'X-Custom: value',
+      '--source-header-env', 'SOURCE_AUTH',
+      '--source-header-env', 'SOURCE_CUSTOM',
       '--dry-run',
       '--write-config',
     ], testIO)).resolves.toBe(0);
@@ -120,11 +128,11 @@ describe('runCli', () => {
     await expect(runCli([
       'migrate',
       '--target', 'https://target.example/lfs',
-      '--token', 'tok',
-      '--source-header', 'Authorization=Bearer source',
+      '--token-env', 'TOKEN',
+      '--source-header-env', 'SOURCE_INVALID',
     ], testIO)).resolves.toBe(2);
 
-    expect(testIO.err.join('')).toContain('invalid --source-header');
+    expect(testIO.err.join('')).toContain('invalid --source-header-env value');
   });
 
   test('adds admin-managed user', async () => {
@@ -133,14 +141,37 @@ describe('runCli', () => {
     await expect(runCli([
       'user', 'add',
       '--target', 'https://worker.example',
-      '--token', 'admin',
+      '--token-env', 'ADMIN_TOKEN',
       '--username', 'alice',
-      '--password', 'secret-password',
+      '--password-env', 'PASSWORD',
       '--access', 'write',
     ], testIO)).resolves.toBe(0);
 
     expect(testIO.userCalls).toEqual([{ action: 'add', targetUrl: 'https://worker.example', token: 'admin', username: 'alice', password: 'secret-password', access: 'write' }]);
     expect(testIO.out.join('')).toBe('username=alice access=write\n');
+  });
+
+  test('reads a user password from standard input', async () => {
+    const testIO = io({ readStdin: async () => 'secret-password\n' });
+
+    await expect(runCli([
+      'user', 'add',
+      '--target', 'https://worker.example',
+      '--token-env', 'ADMIN_TOKEN',
+      '--username', 'alice',
+      '--password-stdin',
+      '--access', 'write',
+    ], testIO)).resolves.toBe(0);
+
+    expect(testIO.userCalls[0]?.password).toBe('secret-password');
+  });
+
+  test('rejects plaintext secret arguments', async () => {
+    const testIO = io();
+
+    await expect(runCli(['migrate', '--target', 'https://target.example/lfs', '--token', 'tok'], testIO)).resolves.toBe(2);
+
+    expect(testIO.err.join('')).toContain('unknown option: --token');
   });
 
   test('deletes admin-managed user', async () => {
@@ -149,7 +180,7 @@ describe('runCli', () => {
     await expect(runCli([
       'user', 'delete',
       '--target', 'https://worker.example',
-      '--token', 'admin',
+      '--token-env', 'ADMIN_TOKEN',
       '--username', 'alice',
     ], testIO)).resolves.toBe(0);
 
@@ -163,9 +194,9 @@ describe('runCli', () => {
     await expect(runCli([
       'user', 'add',
       '--target', 'https://worker.example',
-      '--token', 'admin',
+      '--token-env', 'ADMIN_TOKEN',
       '--username', 'alice',
-      '--password', 'secret-password',
+      '--password-env', 'PASSWORD',
     ], testIO)).resolves.toBe(2);
 
     expect(testIO.err.join('')).toContain('missing required option: --access read|write');

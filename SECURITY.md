@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-Security fixes target the latest released version and `main`.
+Security fixes target the latest `0.3.x` release and `main`.
 
 ## Reporting a Vulnerability
 
@@ -17,5 +17,7 @@ Include:
 - reproduction steps
 - expected impact
 - any suggested mitigation
+
+Do not include passwords, bearer tokens, R2 credentials, or object contents in reports.
 
 Maintainers will acknowledge valid reports as soon as possible and coordinate a fix before public disclosure.

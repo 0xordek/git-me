@@ -272,7 +272,7 @@ async function runUser(args, io) {
     io.stdout(userUsage());
     return 0;
   }
-  const parsed = parseUserArgs(args);
+  const parsed = await parseUserArgs(args, io);
   if ("error" in parsed) {
     io.stderr(`${parsed.error}
 
@@ -294,7 +294,7 @@ async function runMigrate(args, io) {
     io.stdout(migrateUsage());
     return 0;
   }
-  const parsed = parseMigrateArgs(args, io.cwd?.() ?? process.cwd());
+  const parsed = await parseMigrateArgs(args, io.cwd?.() ?? process.cwd(), io);
   if ("error" in parsed) {
     io.stderr(`${parsed.error}
 
@@ -311,32 +311,64 @@ ${migrateUsage()}`);
     return 1;
   }
 }
-function parseUserArgs(args) {
+async function parseUserArgs(args, io) {
   const action = args[0];
   if (action !== "add" && action !== "delete") return { error: "missing user action: add or delete" };
   let targetUrl = "";
-  let token = "";
+  let token;
   let username = "";
-  let password = "";
+  let password;
   let access = "";
   for (let index = 1; index < args.length; index += 1) {
     const arg = args[index];
+    if (arg === "--token-stdin") {
+      if (token) return { error: "duplicate token source" };
+      token = { stdin: true };
+      continue;
+    }
+    if (arg === "--password-stdin") {
+      if (password) return { error: "duplicate password source" };
+      password = { stdin: true };
+      continue;
+    }
     const value = args[index + 1];
     if (!value || value.startsWith("--")) return { error: `missing value for ${arg}` };
     index += 1;
     if (arg === "--target") targetUrl = value;
-    else if (arg === "--token") token = value;
-    else if (arg === "--username") username = value;
-    else if (arg === "--password") password = value;
-    else if (arg === "--access") access = value;
+    else if (arg === "--token-env") {
+      if (token) return { error: "duplicate token source" };
+      const source = envSecret(value);
+      if (!source) return { error: `invalid environment variable name: ${value}` };
+      token = source;
+    } else if (arg === "--username") username = value;
+    else if (arg === "--password-env") {
+      if (password) return { error: "duplicate password source" };
+      const source = envSecret(value);
+      if (!source) return { error: `invalid environment variable name: ${value}` };
+      password = source;
+    } else if (arg === "--access") access = value;
     else return { error: `unknown option: ${arg}` };
   }
   if (!targetUrl) return { error: "missing required option: --target" };
-  if (!token) return { error: "missing required option: --token" };
+  if (!token) return { error: "missing required option: --token-env or --token-stdin" };
   if (!username) return { error: "missing required option: --username" };
-  if (action === "add" && !password) return { error: "missing required option: --password" };
+  if (action === "add" && !password) return { error: "missing required option: --password-env or --password-stdin" };
   if (action === "add" && access !== "read" && access !== "write") return { error: "missing required option: --access read|write" };
-  return { options: { action, targetUrl, token, username, password: password || void 0, access: access || void 0 } };
+  if (isStdinSecret(token) && password && isStdinSecret(password)) return { error: "only one secret may use standard input" };
+  try {
+    return {
+      options: {
+        action,
+        targetUrl,
+        token: await readSecret(token, io),
+        username,
+        password: password ? await readSecret(password, io) : void 0,
+        access: access || void 0
+      }
+    };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
 }
 async function requestUser(options) {
   const url = new URL(`/admin/users/${encodeURIComponent(options.username)}`, options.targetUrl.endsWith("/") ? options.targetUrl : `${options.targetUrl}/`);
@@ -352,8 +384,8 @@ async function requestUser(options) {
   if (!res.ok) throw new Error(text.trim() || `request failed: ${res.status}`);
   return JSON.parse(text);
 }
-function parseMigrateArgs(args, defaultRepoPath) {
-  const sourceHeaders = {};
+async function parseMigrateArgs(args, defaultRepoPath, io) {
+  const sourceHeaderSources = [];
   let repoPath = defaultRepoPath;
   let sourceUrl;
   let targetUrl;
@@ -371,25 +403,66 @@ function parseMigrateArgs(args, defaultRepoPath) {
       writeConfig = true;
       continue;
     }
+    if (arg === "--token-stdin") {
+      if (targetToken) return { error: "duplicate token source" };
+      targetToken = { stdin: true };
+      continue;
+    }
     const value = args[index + 1];
     if (!value || value.startsWith("--")) return { error: `missing value for ${arg}` };
     index += 1;
     if (arg === "--repo") repoPath = value;
     else if (arg === "--source-url") sourceUrl = value;
     else if (arg === "--target") targetUrl = value;
-    else if (arg === "--token") targetToken = value;
-    else if (arg === "--concurrency") {
+    else if (arg === "--token-env") {
+      if (targetToken) return { error: "duplicate token source" };
+      const source = envSecret(value);
+      if (!source) return { error: `invalid environment variable name: ${value}` };
+      targetToken = source;
+    } else if (arg === "--concurrency") {
       concurrency = Number(value);
       if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16) return { error: "invalid --concurrency" };
-    } else if (arg === "--source-header") {
-      const header = parseHeader(value);
-      if (!header) return { error: "invalid --source-header" };
-      sourceHeaders[header.name] = header.value;
+    } else if (arg === "--source-header-env") {
+      const source = envSecret(value);
+      if (!source) return { error: `invalid environment variable name: ${value}` };
+      sourceHeaderSources.push(source);
     } else return { error: `unknown option: ${arg}` };
   }
   if (!targetUrl) return { error: "missing required option: --target" };
-  if (!targetToken) return { error: "missing required option: --token" };
-  return { options: { repoPath, sourceUrl, sourceHeaders, targetUrl, targetToken, concurrency, dryRun, writeConfig } };
+  if (!targetToken) return { error: "missing required option: --token-env or --token-stdin" };
+  try {
+    const sourceHeaders = {};
+    for (const source of sourceHeaderSources) {
+      const header = parseHeader(await readSecret(source, io));
+      if (!header) return { error: "invalid --source-header-env value" };
+      sourceHeaders[header.name] = header.value;
+    }
+    return { options: { repoPath, sourceUrl, sourceHeaders, targetUrl, targetToken: await readSecret(targetToken, io), concurrency, dryRun, writeConfig } };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+function envSecret(name) {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? { env: name } : null;
+}
+function isStdinSecret(source) {
+  return "stdin" in source;
+}
+async function readSecret(source, io) {
+  if ("env" in source) {
+    const value2 = (io.env ?? process.env)[source.env];
+    if (!value2) throw new Error(`missing environment variable: ${source.env}`);
+    return value2;
+  }
+  const value = await (io.readStdin ?? readStdin)();
+  const secret = value.replace(/\r?\n$/, "");
+  if (!secret) throw new Error("standard input secret is empty");
+  return secret;
+}
+async function readStdin() {
+  let value = "";
+  for await (const chunk of process.stdin) value += String(chunk);
+  return value;
 }
 function parseHeader(input) {
   const index = input.indexOf(":");
@@ -407,22 +480,23 @@ Commands:
 `;
 }
 function migrateUsage() {
-  return `Usage: git-me migrate --target <url> --token <token> [options]
+  return `Usage: git-me migrate --target <url> (--token-env <name>|--token-stdin) [options]
 
 Options:
-  --repo <path>                 repository path (default: current directory)
-  --source-url <url>            source LFS URL (default: git config lfs.url)
-  --source-header <name: value> source LFS header, repeatable
-  --concurrency <number>        concurrent transfers, 1..16 (default: 4)
-  --dry-run                     scan without transferring objects
-  --write-config                update lfs.url after successful migration
+  --repo <path>                  repository path (default: current directory)
+  --source-url <url>             source LFS URL (default: git config lfs.url)
+  --source-header-env <name>     env var containing name: value, repeatable
+  --concurrency <number>         concurrent transfers, 1..16 (default: 4)
+  --dry-run                      scan without transferring objects
+  --write-config                 update lfs.url after successful migration
 `;
 }
 function userUsage() {
-  return `Usage: git-me user <add|delete> --target <url> --token <admin-token> --username <name> [options]
+  return `Usage: git-me user <add|delete> --target <url> (--token-env <name>|--token-stdin) --username <name> [options]
 
 Options:
-  --password <password>  password for add
+  --password-env <name>  env var containing password for add
+  --password-stdin       read password for add from standard input
   --access <read|write>  access for add
 `;
 }

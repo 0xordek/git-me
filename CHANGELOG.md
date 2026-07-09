@@ -2,9 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased
+## 0.3.0 - 2026-07-09
 
-- Added CLI commands for admin-managed LFS users.
+- Moved user credentials and login throttling into per-user Durable Objects.
+- Replaced unsalted SHA-256 credential storage with salted PBKDF2-SHA-256 records; legacy users upgrade after successful login.
+- Changed `direct` mode to signed R2 downloads only; uploads always use Worker SHA-256 verification.
+- Removed KV object metadata from object-presence checks; R2 is authoritative for object existence and size.
+- Removed secret-valued CLI arguments in favor of environment variables and standard input.
+- Renamed npm package to `@0xordek/git-me` and added provenance-ready publishing metadata.
+- Added Durable Object migration, package-artifact verification, and npm trusted-publishing release flow.
 
 ## 0.2.0 - 2026-07-09
 
@@ -13,7 +19,7 @@ All notable changes to this project will be documented in this file.
 - Added read/write access checks for pull and push flows.
 - Documented first-login credential storage and repo-level `.lfsconfig` setup.
 
-## 0.1.0 - 2026-07-09
+## 0.1.0 - 2026-07-08
 
 - Rewrote the Worker runtime as TypeScript.
 - Removed Go and TinyGo source/build files from the current tree without rewriting git history.

@@ -1,11 +1,12 @@
 import { ConfigError, healthResponse, loadConfig } from './config';
 import type { AppConfig } from './config';
 import { presignR2Url } from './signing';
+import { authenticateUser, createUser, deleteUser, type UserAccess } from './auth';
+
+export { AuthUser } from './auth-do';
 
 const LFS_CONTENT_TYPE = 'application/vnd.git-lfs+json';
 const OBJECT_PREFIX = 'objects/';
-const META_PREFIX = 'object:';
-const USER_PREFIX = 'user:';
 const OID_RE = /^[0-9a-fA-F]{64}$/;
 const USERNAME_RE = /^[a-z0-9][a-z0-9_.-]{0,62}$/;
 
@@ -19,6 +20,7 @@ export interface Env {
   GITME_R2_BUCKET_NAME?: string;
   GITME_R2: R2Bucket;
   GITME_KV: KVNamespace;
+  GITME_AUTH: DurableObjectNamespace;
 }
 
 type LfsOperation = 'upload' | 'download';
@@ -34,30 +36,18 @@ type LfsBatchRequest = {
   objects?: unknown;
 };
 
-type ObjectMeta = {
-  oid: string;
-  size: number;
-  created_at: string;
-  uploaded: boolean;
-};
-
 type DigestResult = {
   hex: string;
   size: number;
 };
 
-type UserAccess = 'read' | 'write';
-
-type UserRecord = {
-  password_sha256: string;
-  access: UserAccess;
-  created_at: string;
-};
-
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+    const requestId = crypto.randomUUID();
+    let path = '';
     try {
       const url = new URL(request.url);
+      path = url.pathname;
       if (request.method === 'GET' && url.pathname === '/health') {
         return healthResponse(env);
       }
@@ -89,8 +79,16 @@ export default {
         return lfsError(405, 'method not allowed');
       }
       return new Response('not found\n', { status: 404 });
-    } catch {
-      return lfsError(500, 'internal server error');
+    } catch (error) {
+      console.error('git-me request failed', {
+        requestId,
+        method: request.method,
+        path,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      const response = lfsError(500, 'internal server error');
+      response.headers.set('X-Request-Id', requestId);
+      return response;
     }
   },
 } satisfies ExportedHandler<Env>;
@@ -129,56 +127,28 @@ async function handleBatch(request: Request, env: Env, config: AppConfig): Promi
   for (const obj of objects) {
     const href = new URL(`/objects/${obj.oid}`, request.url).href;
     if (body.operation === 'upload') {
-      if (config.transferMode === 'direct' && config.r2Signing) {
-        const existingMetaText = await env.GITME_KV.get(META_PREFIX + obj.oid);
-        const existingMeta = existingMetaText ? JSON.parse(existingMetaText) as ObjectMeta : null;
-        const existingHead = existingMeta?.uploaded ? await env.GITME_R2.head(OBJECT_PREFIX + obj.oid) : null;
-        if (existingMeta?.uploaded) {
-          responseObjects.push(existingHead?.size === existingMeta.size && existingMeta.size === obj.size ? { oid: obj.oid, size: obj.size } : objectNotFound(obj));
-          continue;
-        }
-        const meta: ObjectMeta = { oid: obj.oid, size: obj.size, created_at: new Date().toISOString(), uploaded: false };
-        await env.GITME_KV.put(META_PREFIX + obj.oid, JSON.stringify(meta));
-        responseObjects.push({
-          oid: obj.oid,
-          size: obj.size,
-          actions: {
-            upload: {
-              href: await presignR2Url({
-                method: 'PUT',
-                key: OBJECT_PREFIX + obj.oid,
-                expiresSeconds: config.signedUrlTtlSeconds,
-                signing: config.r2Signing,
-              }),
-              expires_in: config.signedUrlTtlSeconds,
-            },
-          },
-        });
+      const existing = await env.GITME_R2.head(OBJECT_PREFIX + obj.oid);
+      if (existing?.customMetadata?.sha256 === obj.oid.toLowerCase()) {
+        responseObjects.push(existing.size === obj.size ? { oid: obj.oid, size: obj.size } : objectConflict(obj));
         continue;
       }
       responseObjects.push({ oid: obj.oid, size: obj.size, actions: { upload: { href } } });
       continue;
     }
 
-    const metaText = await env.GITME_KV.get(META_PREFIX + obj.oid);
-    if (!metaText) {
-      responseObjects.push(objectNotFound(obj));
-      continue;
-    }
-    const meta = JSON.parse(metaText) as ObjectMeta;
     const head = await env.GITME_R2.head(OBJECT_PREFIX + obj.oid);
-    if (!head || head.size !== meta.size) {
+    if (!head || head.size !== obj.size) {
       responseObjects.push(objectNotFound(obj));
       continue;
-    }
-    if (!meta.uploaded) {
-      meta.uploaded = true;
-      await env.GITME_KV.put(META_PREFIX + obj.oid, JSON.stringify(meta));
     }
     if (config.transferMode === 'direct' && config.r2Signing) {
+      if (head.customMetadata?.sha256 !== obj.oid.toLowerCase()) {
+        responseObjects.push({ oid: obj.oid, size: head.size, actions: { download: { href } } });
+        continue;
+      }
       responseObjects.push({
         oid: obj.oid,
-        size: meta.size,
+        size: head.size,
         actions: {
           download: {
             href: await presignR2Url({
@@ -193,7 +163,7 @@ async function handleBatch(request: Request, env: Env, config: AppConfig): Promi
       });
       continue;
     }
-    responseObjects.push({ oid: obj.oid, size: meta.size, actions: { download: { href } } });
+    responseObjects.push({ oid: obj.oid, size: head.size, actions: { download: { href } } });
   }
 
   return json(200, { transfer, objects: responseObjects });
@@ -217,11 +187,9 @@ async function handleUpload(request: Request, env: Env, oid: string): Promise<Re
 
   const tempObject = await env.GITME_R2.get(tempKey);
   if (!tempObject?.body) return lfsError(500, 'internal server error');
-  await env.GITME_R2.put(objectKey, tempObject.body);
+  await env.GITME_R2.put(objectKey, tempObject.body, { customMetadata: { sha256: oid.toLowerCase() } });
   await env.GITME_R2.delete(tempKey);
 
-  const meta: ObjectMeta = { oid, size: digest.size, created_at: new Date().toISOString(), uploaded: true };
-  await env.GITME_KV.put(META_PREFIX + oid, JSON.stringify(meta));
   return new Response(null, { status: 200 });
 }
 
@@ -237,16 +205,15 @@ async function handleAdminUser(request: Request, env: Env, config: AppConfig, ra
     } catch {
       return appJson(400, { message: 'invalid JSON' });
     }
-    if (typeof body.password !== 'string' || body.password.length < 8) return appJson(400, { message: 'password must be at least 8 characters' });
+    if (typeof body.password !== 'string' || body.password.length < 12) return appJson(400, { message: 'password must be at least 12 characters' });
     const access = body.access === 'read' || body.access === 'write' ? body.access : '';
     if (!access) return appJson(400, { message: 'access must be read or write' });
-    const record: UserRecord = { password_sha256: await sha256Hex(body.password), access, created_at: new Date().toISOString() };
-    await env.GITME_KV.put(USER_PREFIX + username, JSON.stringify(record));
+    await createUser(env, username, body.password, access);
     return appJson(200, { username, access });
   }
 
   if (request.method === 'DELETE') {
-    await env.GITME_KV.delete(USER_PREFIX + username);
+    await deleteUser(env, username);
     return appJson(200, { username, deleted: true });
   }
 
@@ -255,11 +222,6 @@ async function handleAdminUser(request: Request, env: Env, config: AppConfig, ra
 
 async function handleDownload(env: Env, oid: string): Promise<Response> {
   if (!OID_RE.test(oid)) return lfsError(400, 'invalid oid');
-  const metaText = await env.GITME_KV.get(META_PREFIX + oid);
-  if (!metaText) return lfsError(404, 'object not found');
-  const meta = JSON.parse(metaText) as ObjectMeta;
-  if (!meta.uploaded) return lfsError(404, 'object not found');
-
   const object = await env.GITME_R2.get(OBJECT_PREFIX + oid);
   if (!object) return lfsError(404, 'object not found');
 
@@ -267,7 +229,7 @@ async function handleDownload(env: Env, oid: string): Promise<Response> {
     status: 200,
     headers: {
       'Content-Type': 'application/octet-stream',
-      'Content-Length': String(meta.size),
+      'Content-Length': String(object.size),
     },
   });
 }
@@ -299,6 +261,10 @@ function isObjectRecord(value: unknown): value is LfsBatchObject {
 
 function objectNotFound(obj: LfsBatchObject): object {
   return { oid: obj.oid, size: obj.size, error: { code: 404, message: 'object not found' } };
+}
+
+function objectConflict(obj: LfsBatchObject): object {
+  return { oid: obj.oid, size: obj.size, error: { code: 409, message: 'object size mismatch' } };
 }
 
 function json(status: number, body: unknown): Response {
@@ -335,10 +301,9 @@ async function authenticateLfs(request: Request, env: Env, config: AppConfig): P
   const username = normalizeUsername(credentials.username);
   if (!username) return { response: lfsAuthError() };
 
-  const rawRecord = await env.GITME_KV.get(USER_PREFIX + username);
-  const record = rawRecord ? JSON.parse(rawRecord) as UserRecord : null;
-  if (!record || await sha256Hex(credentials.password) !== record.password_sha256) return { response: lfsAuthError() };
-  return { access: record.access };
+  const result = await authenticateUser(env, username, credentials.password, clientSource(request));
+  if (!result.ok || !result.access) return { response: lfsAuthError() };
+  return { access: result.access };
 }
 
 function decodeBasicAuth(encoded: string): { username: string; password: string } | null {
@@ -355,6 +320,11 @@ function decodeBasicAuth(encoded: string): { username: string; password: string 
 function normalizeUsername(username: string): string {
   const normalized = username.trim().toLowerCase();
   return USERNAME_RE.test(normalized) ? normalized : '';
+}
+
+function clientSource(request: Request): string {
+  const source = request.headers.get('CF-Connecting-IP') || 'unknown';
+  return /^[0-9a-fA-F:.]{1,45}$/.test(source) ? source : 'unknown';
 }
 
 function canAccess(actual: UserAccess, needed: UserAccess): boolean {
@@ -379,11 +349,6 @@ async function digestAndCount(stream: ReadableStream<Uint8Array>): Promise<Diges
   const buffer = await new Response(stream).arrayBuffer();
   const digest = await crypto.subtle.digest('SHA-256', buffer);
   return { hex: bytesToHex(new Uint8Array(digest)), size: buffer.byteLength };
-}
-
-async function sha256Hex(text: string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
-  return bytesToHex(new Uint8Array(digest));
 }
 
 function bytesToHex(bytes: Uint8Array): string {
