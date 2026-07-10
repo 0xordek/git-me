@@ -1,6 +1,6 @@
 {
   "name": "@0xordek/git-me",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Self-hosted Git LFS utility for Cloudflare Workers, R2, and Durable Objects.",
   "license": "MIT",
   "repository": {
@@ -22,14 +22,20 @@
     "git-me": "dist/cli.js"
   },
   "files": [
-    "dist/cli.js"
+    "dist/cli.js",
+    "dist/worker.js"
   ],
+  "dependencies": {
+    "wrangler": "^4.107.1"
+  },
   "scripts": {
-    "build": "wrangler deploy --dry-run --config wrangler.example.toml --outdir dist --metafile dist/bundle-meta.json",
+    "build": "npm run build:worker",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "build:cli": "esbuild src/cli.ts --bundle --platform=node --format=esm --outfile=dist/cli.js --banner:js=\"#!/usr/bin/env node\"",
-    "check": "npm test && npm run typecheck && npm run build:cli && git diff --exit-code -- dist/cli.js && npm pack --dry-run && npm run deploy:dry",
+    "prepack": "npm run build:worker && npm run build:cli",
+    "check": "npm test && npm run typecheck && npm run build:worker && npm run build:cli && git diff --exit-code -- dist/cli.js && npm pack --dry-run --json | node -e \"let data='';process.stdin.on('data',chunk=>data+=chunk).on('end',()=>{if(!JSON.parse(data)[0].files.some(file=>file.path==='dist/worker.js'))process.exit(1)})\" && npm run deploy:dry",
+    "build:worker": "esbuild src/worker.ts --bundle --format=esm --platform=browser --outfile=dist/worker.js",
     "deploy:dry": "wrangler deploy --dry-run --config wrangler.example.toml",
     "deploy": "wrangler deploy --config wrangler.local.toml",
     "version:upload": "wrangler versions upload --config wrangler.local.toml",
@@ -40,7 +46,6 @@
     "@types/node": "^26.1.0",
     "esbuild": "^0.28.1",
     "typescript": "^6.0.3",
-    "vitest": "^3.2.7",
-    "wrangler": "^4.107.1"
+    "vitest": "^3.2.7"
   }
 }

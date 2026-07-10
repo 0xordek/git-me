@@ -188,7 +188,7 @@ describe('runCli', () => {
     expect(testIO.out.join('')).toBe('username=alice deleted=true\n');
   });
 
-  test('rejects user add without access', async () => {
+  test('defaults explicit-target user add to read access', async () => {
     const testIO = io();
 
     await expect(runCli([
@@ -197,8 +197,62 @@ describe('runCli', () => {
       '--token-env', 'ADMIN_TOKEN',
       '--username', 'alice',
       '--password-env', 'PASSWORD',
-    ], testIO)).resolves.toBe(2);
+    ], testIO)).resolves.toBe(0);
 
-    expect(testIO.err.join('')).toContain('missing required option: --access read|write');
+    expect(testIO.userCalls[0]?.access).toBe('read');
+  });
+
+  test('uses the saved profile for user list JSON output', async () => {
+    const userCalls: UserCall[] = [];
+    const testIO = io({
+      profileStore: {
+        get: vi.fn(async () => ({ name: 'default', endpoint: 'https://worker.example', workerName: 'worker', createdAt: '2026-01-01T00:00:00.000Z' })),
+        save: vi.fn(async () => undefined),
+      },
+      credentialStore: {
+        get: vi.fn(async () => 'admin-secret'),
+        set: vi.fn(async () => undefined),
+        delete: vi.fn(async () => undefined),
+      },
+      userRequest: vi.fn(async (options) => {
+        userCalls.push(options);
+        return { users: [{ username: 'alice', access: 'read' as const }] };
+      }),
+    });
+
+    await expect(runCli(['user', 'list', '--json'], testIO)).resolves.toBe(0);
+
+    expect(userCalls).toEqual([{ action: 'list', targetUrl: 'https://worker.example', token: 'admin-secret', username: undefined, password: undefined, access: undefined, json: true }]);
+    expect(testIO.out.join('')).toBe('[{"username":"alice","access":"read"}]\n');
+  });
+
+  test('requires an explicit token for a custom target', async () => {
+    const credentialStore = {
+      get: vi.fn(async () => 'admin-secret'),
+      set: vi.fn(async () => undefined),
+      delete: vi.fn(async () => undefined),
+    };
+    const testIO = io({
+      profileStore: {
+        get: vi.fn(async () => ({ name: 'default', endpoint: 'https://worker.example', workerName: 'worker', createdAt: '2026-01-01T00:00:00.000Z' })),
+        save: vi.fn(async () => undefined),
+      },
+      credentialStore,
+    });
+
+    await expect(runCli(['user', 'list', '--target', 'https://untrusted.example'], testIO)).resolves.toBe(2);
+
+    expect(credentialStore.get).not.toHaveBeenCalled();
+    expect(testIO.err.join('')).toContain('missing admin credential');
+  });
+
+  test('deploys a worker and prints the saved profile endpoint', async () => {
+    const testIO = io({
+      workerDeploy: vi.fn(async (options) => ({ profile: options.profile, endpoint: 'https://worker.example', workerName: options.workerName || 'generated', bucketName: 'bucket' })),
+    });
+
+    await expect(runCli(['worker', 'deploy', '--name', 'worker', '--profile', 'team'], testIO)).resolves.toBe(0);
+
+    expect(testIO.out.join('')).toBe('Deployed: https://worker.example\nProfile: team\nLFS URL: https://worker.example\n');
   });
 });

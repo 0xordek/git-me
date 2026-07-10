@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.4.0 - 2026-07-10
+
+- Added zero-config `worker deploy` with packaged Worker bundle, resource provisioning, health checks, and local profiles.
+- Added OS credential-store integration with stdin/environment fallback for admin credentials.
+- Added `user list`, delete confirmation, JSON output, and a password-free admin user index.
+
 ## 0.3.0 - 2026-07-09
 
 - Moved user credentials and login throttling into per-user Durable Objects.

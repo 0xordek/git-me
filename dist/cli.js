@@ -3,6 +3,389 @@
 // src/cli.ts
 import { pathToFileURL } from "node:url";
 
+// src/credentials.ts
+import { execFile } from "node:child_process";
+import { platform } from "node:os";
+var SERVICE = "git-me";
+function createCredentialStore() {
+  return new SystemCredentialStore();
+}
+var SystemCredentialStore = class {
+  async get(key) {
+    if (platform() === "darwin") return await macGet(key);
+    if (platform() === "linux") return await linuxGet(key);
+    return await windowsGet(key);
+  }
+  async set(key, value) {
+    if (!value) throw new Error("credential cannot be empty");
+    if (platform() === "darwin") return await macSet(key, value);
+    if (platform() === "linux") return await linuxSet(key, value);
+    return await windowsSet(key, value);
+  }
+  async delete(key) {
+    if (platform() === "darwin") return await macDelete(key);
+    if (platform() === "linux") return await linuxDelete(key);
+    return await windowsDelete(key);
+  }
+};
+async function macGet(key) {
+  const result = await run("security", ["find-generic-password", "-a", SERVICE, "-s", key, "-w"], void 0, true);
+  return result?.trim() || null;
+}
+async function macSet(key, value) {
+  await run("security", ["add-generic-password", "-U", "-a", SERVICE, "-s", key], value);
+}
+async function macDelete(key) {
+  await run("security", ["delete-generic-password", "-a", SERVICE, "-s", key], void 0, true);
+}
+async function linuxGet(key) {
+  const result = await run("secret-tool", ["lookup", "service", SERVICE, "profile", key], void 0, true);
+  return result?.trim() || null;
+}
+async function linuxSet(key, value) {
+  await run("secret-tool", ["store", "--label=git-me credential", "service", SERVICE, "profile", key], value);
+}
+async function linuxDelete(key) {
+  await run("secret-tool", ["clear", "service", SERVICE, "profile", key], void 0, true);
+}
+async function windowsGet(key) {
+  const script = `${windowsCredentialApi()}
+$ptr = [IntPtr]::Zero
+if ([WinCred]::CredRead($args[0], 1, 0, [ref]$ptr)) {
+  try {
+    $credential = [Runtime.InteropServices.Marshal]::PtrToStructure($ptr, [type][WinCred+CREDENTIAL])
+    $bytes = New-Object byte[] $credential.CredentialBlobSize
+    [Runtime.InteropServices.Marshal]::Copy($credential.CredentialBlob, $bytes, 0, $bytes.Length)
+    [Console]::Out.Write([Text.Encoding]::UTF8.GetString($bytes))
+  } finally { [WinCred]::CredFree($ptr) }
+}`;
+  const result = await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, key], void 0, true);
+  return result?.trim() || null;
+}
+async function windowsSet(key, value) {
+  const script = `${windowsCredentialApi()}
+$value = [Console]::In.ReadToEnd()
+$bytes = [Text.Encoding]::UTF8.GetBytes($value)
+$ptr = [Runtime.InteropServices.Marshal]::AllocHGlobal($bytes.Length)
+try {
+  [Runtime.InteropServices.Marshal]::Copy($bytes, 0, $ptr, $bytes.Length)
+  $credential = New-Object WinCred+CREDENTIAL
+  $credential.Type = 1
+  $credential.TargetName = $args[0]
+  $credential.UserName = 'git-me'
+  $credential.CredentialBlobSize = $bytes.Length
+  $credential.CredentialBlob = $ptr
+  $credential.Persist = 2
+  if (-not [WinCred]::CredWrite([ref]$credential, 0)) { throw 'CredWrite failed' }
+} finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($ptr) }`;
+  await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, key], value);
+}
+async function windowsDelete(key) {
+  const script = `${windowsCredentialApi()}
+[WinCred]::CredDelete($args[0], 1, 0) | Out-Null`;
+  await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, key], void 0, true);
+}
+function windowsCredentialApi() {
+  return `Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class WinCred {
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  public struct CREDENTIAL {
+    public UInt32 Flags; public UInt32 Type; public string TargetName; public string Comment;
+    public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+    public UInt32 CredentialBlobSize; public IntPtr CredentialBlob; public UInt32 Persist;
+    public UInt32 AttributeCount; public IntPtr Attributes; public string TargetAlias; public string UserName;
+  }
+  [DllImport("advapi32.dll", EntryPoint = "CredWriteW", CharSet = CharSet.Unicode, SetLastError = true)]
+  public static extern bool CredWrite(ref CREDENTIAL credential, UInt32 flags);
+  [DllImport("advapi32.dll", EntryPoint = "CredReadW", CharSet = CharSet.Unicode, SetLastError = true)]
+  public static extern bool CredRead(string target, UInt32 type, UInt32 flags, out IntPtr credential);
+  [DllImport("advapi32.dll", EntryPoint = "CredDeleteW", CharSet = CharSet.Unicode, SetLastError = true)]
+  public static extern bool CredDelete(string target, UInt32 type, UInt32 flags);
+  [DllImport("advapi32.dll", EntryPoint = "CredFree")]
+  public static extern void CredFree(IntPtr credential);
+}
+'@`;
+}
+function run(command, args, input, ignoreFailure = false) {
+  return new Promise((resolve2, reject) => {
+    const child = execFile(command, args, { encoding: "utf8" }, (error, stdout, stderr) => {
+      if (error) {
+        if (ignoreFailure) return resolve2(null);
+        reject(new Error(`credential store unavailable: ${stderr.trim() || error.message}`));
+        return;
+      }
+      resolve2(stdout);
+    });
+    if (input !== void 0) {
+      child.stdin?.write(input);
+      child.stdin?.end();
+    }
+  });
+}
+
+// src/deploy.ts
+import { randomBytes } from "node:crypto";
+import { appendFile, mkdtemp, rm, writeFile as writeFile2 } from "node:fs/promises";
+import { dirname as dirname2, join as join2, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import { spawn } from "node:child_process";
+import { tmpdir } from "node:os";
+
+// src/profile.ts
+import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { homedir, platform as platform2 } from "node:os";
+import { dirname, join } from "node:path";
+function createProfileStore(env = process.env) {
+  return new FileProfileStore(profileFilePath(env));
+}
+var FileProfileStore = class {
+  constructor(filePath) {
+    this.filePath = filePath;
+  }
+  filePath;
+  async get(name) {
+    const file = await readProfileFile(this.filePath);
+    const profile = file.profiles[name];
+    return profile && profile.name === name ? profile : null;
+  }
+  async save(profile) {
+    const file = await readProfileFile(this.filePath);
+    file.profiles[profile.name] = profile;
+    file.current = profile.name;
+    await mkdir(dirname(this.filePath), { recursive: true, mode: 448 });
+    const temporaryPath = `${this.filePath}.tmp`;
+    await writeFile(temporaryPath, `${JSON.stringify(file, null, 2)}
+`, { mode: 384 });
+    await rename(temporaryPath, this.filePath);
+    await chmod(this.filePath, 384).catch(() => void 0);
+  }
+};
+async function readProfileFile(filePath) {
+  try {
+    const parsed = JSON.parse(await readFile(filePath, "utf8"));
+    if (parsed.version !== 1 || !parsed.profiles || typeof parsed.profiles !== "object") throw new Error(`invalid profile file: ${filePath}`);
+    return {
+      version: 1,
+      current: typeof parsed.current === "string" ? parsed.current : "default",
+      profiles: parsed.profiles
+    };
+  } catch (error) {
+    if (error.code === "ENOENT") return { version: 1, current: "default", profiles: {} };
+    if (error instanceof SyntaxError) throw new Error(`invalid profile file: ${filePath}`);
+    throw error;
+  }
+}
+function profileFilePath(env) {
+  if (env.GITME_CONFIG_DIR) return join(env.GITME_CONFIG_DIR, "profiles.json");
+  if (platform2() === "win32" && env.APPDATA) return join(env.APPDATA, "git-me", "profiles.json");
+  if (platform2() === "darwin") return join(homedir(), "Library", "Application Support", "git-me", "profiles.json");
+  return join(env.XDG_CONFIG_HOME || join(homedir(), ".config"), "git-me", "profiles.json");
+}
+
+// src/deploy.ts
+var COMPATIBILITY_DATE = "2026-07-07";
+var require2 = createRequire(import.meta.url);
+async function deployWorker(options, deps = {}) {
+  const runCommand = deps.runCommand ?? runWrangler;
+  const profileStore = deps.profileStore ?? createProfileStore();
+  const credentialStore = deps.credentialStore ?? createCredentialStore();
+  const createTempDirectory = deps.createTempDirectory ?? (() => mkdtemp(join2(tmpdir(), "git-me-deploy-")));
+  const generateSecret = deps.generateSecret ?? (() => randomBytes(32).toString("base64url"));
+  const fetchImpl = deps.fetch ?? fetch;
+  const workerName = options.workerName || defaultWorkerName();
+  const workerNameGenerated = !options.workerName;
+  const bucketName = `${workerName}-objects`;
+  const kvName = `${workerName}-metadata`;
+  const adminSecret = options.adminSecret ?? generateSecret();
+  if (await profileStore.get(options.profile)) throw new Error(`profile already exists: ${options.profile}`);
+  let storedCredential = false;
+  if (!options.adminSecret) {
+    try {
+      await credentialStore.set(credentialKey(options.profile), adminSecret);
+      storedCredential = true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`${message}; re-run with --token-stdin if the OS credential store is unavailable`);
+    }
+  }
+  const tempDirectory = await createTempDirectory();
+  const configPath = join2(tempDirectory, "wrangler.toml");
+  const workerBundle = deps.workerBundle ?? defaultWorkerBundle();
+  let bucketCreated = false;
+  let kvCreated = false;
+  let workerDeployed = false;
+  let kvNamespaceId;
+  try {
+    await writeFile2(configPath, initialConfig(workerName, workerBundle));
+    await runCommand(["login"], { interactive: true });
+    const whoami = await runCommand(["whoami"]);
+    const accountId = options.accountId ?? accountIdFromOutput(`${whoami.stdout}
+${whoami.stderr}`);
+    if (!accountId) throw new Error("Cloudflare did not report an account ID");
+    await writeFile2(configPath, initialConfig(workerName, workerBundle, accountId));
+    await runCommand(["r2", "bucket", "create", bucketName, "--config", configPath]);
+    bucketCreated = true;
+    await appendFile(configPath, r2Binding(bucketName));
+    const kvOutput = await runCommand(["kv", "namespace", "create", kvName, "--config", configPath]);
+    kvCreated = true;
+    kvNamespaceId = kvNamespaceIdFromOutput(`${kvOutput.stdout}
+${kvOutput.stderr}`);
+    if (!kvNamespaceId) throw new Error("Cloudflare did not report a KV namespace ID");
+    await appendFile(configPath, kvBinding(kvNamespaceId));
+    const deployOutput = await runCommand(["deploy", "--config", configPath, "--no-bundle"]);
+    workerDeployed = true;
+    const endpoint = endpointFromOutput(`${deployOutput.stdout}
+${deployOutput.stderr}`);
+    if (!endpoint) throw new Error("Cloudflare did not report a Workers URL after deploy");
+    await runCommand(["secret", "put", "GITME_AUTH_TOKEN", "--config", configPath], { input: adminSecret });
+    await waitForHealth(endpoint, fetchImpl);
+    let warning;
+    if (options.adminSecret) {
+      try {
+        await credentialStore.set(credentialKey(options.profile), adminSecret);
+      } catch {
+        warning = "Admin credential was not saved to the OS credential store; use --token-stdin for user commands.";
+      }
+    }
+    const result = {
+      profile: options.profile,
+      endpoint,
+      workerName,
+      accountId,
+      bucketName,
+      kvNamespaceId,
+      warning
+    };
+    const profile = {
+      name: options.profile,
+      endpoint,
+      workerName,
+      accountId: result.accountId,
+      bucketName,
+      kvNamespaceId,
+      createdAt: (deps.now ?? (() => (/* @__PURE__ */ new Date()).toISOString()))()
+    };
+    await profileStore.save(profile);
+    return result;
+  } catch (error) {
+    if (storedCredential) await credentialStore.delete(credentialKey(options.profile)).catch(() => void 0);
+    const cleanup = [];
+    if (workerDeployed && workerNameGenerated) await runCommand(["delete", workerName, "--config", configPath, "--force"]).catch(() => cleanup.push(`Worker ${workerName}`));
+    else if (workerDeployed) cleanup.push(`Worker ${workerName}`);
+    if (kvCreated && kvNamespaceId) await runCommand(["kv", "namespace", "delete", kvNamespaceId, "--config", configPath]).catch(() => cleanup.push(`KV namespace ${kvName}`));
+    else if (kvCreated) cleanup.push(`KV namespace ${kvName}`);
+    if (bucketCreated) await runCommand(["r2", "bucket", "delete", bucketName, "--config", configPath]).catch(() => cleanup.push(`R2 bucket ${bucketName}`));
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(cleanup.length > 0 ? `${message}. Resources to verify: ${cleanup.join(", ")}` : message);
+  } finally {
+    await rm(tempDirectory, { recursive: true, force: true }).catch(() => void 0);
+  }
+}
+function credentialKey(profile) {
+  return `git-me:${profile}:admin`;
+}
+function defaultWorkerName() {
+  return `git-me-${randomBytes(4).toString("hex")}`;
+}
+function defaultWorkerBundle() {
+  return resolve(dirname2(fileURLToPath(import.meta.url)), "worker.js");
+}
+function initialConfig(workerName, workerBundle, accountId) {
+  return [
+    `name = ${tomlString(workerName)}`,
+    `main = ${tomlString(workerBundle)}`,
+    ...accountId ? [`account_id = ${tomlString(accountId)}`] : [],
+    `compatibility_date = ${tomlString(COMPATIBILITY_DATE)}`,
+    "workers_dev = true",
+    "",
+    "[[durable_objects.bindings]]",
+    'name = "GITME_AUTH"',
+    'class_name = "AuthUser"',
+    "",
+    "[[migrations]]",
+    'tag = "v1"',
+    'new_sqlite_classes = ["AuthUser"]',
+    ""
+  ].join("\n");
+}
+function tomlString(value) {
+  return `"${value.replaceAll("\\", "/").replaceAll('"', '\\"')}"`;
+}
+function r2Binding(bucketName) {
+  return `
+[[r2_buckets]]
+binding = "GITME_R2"
+bucket_name = ${tomlString(bucketName)}
+`;
+}
+function kvBinding(namespaceId) {
+  return `
+[[kv_namespaces]]
+binding = "GITME_KV"
+id = ${tomlString(namespaceId)}
+`;
+}
+function kvNamespaceIdFromOutput(output) {
+  return output.match(/\bid\s*=\s*"([0-9a-f]{32})"/i)?.[1];
+}
+function endpointFromOutput(output) {
+  const field = output.match(/"(?:url|workers_dev_url)"\s*:\s*"(https:\/\/[^"\\]+)"/i)?.[1];
+  const match = field ? [field] : output.match(/https:\/\/[a-z0-9][a-z0-9.-]*\.workers\.dev(?:\/[^\s]*)?/i);
+  if (!match) return void 0;
+  return match[1] ? match[1].replace(/[),.]+$/, "") : match[0].replace(/[),.]+$/, "");
+}
+function accountIdFromOutput(output) {
+  return output.match(/\b[0-9a-f]{32}\b/i)?.[0];
+}
+async function waitForHealth(endpoint, fetchImpl) {
+  let lastError = "health check failed";
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      const response = await fetchImpl(new URL("/health", endpoint));
+      if (response.ok) {
+        const body = await response.json();
+        if (body.ok === true) return;
+      }
+      lastError = `health check returned ${response.status}`;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1e3));
+  }
+  throw new Error(lastError);
+}
+async function runWrangler(args, options) {
+  const executable = process.env.GITME_WRANGLER_BIN || require2.resolve("wrangler");
+  return await spawnCommand(process.execPath, [executable, ...args], options);
+}
+async function spawnCommand(command, args, options = {}) {
+  return await new Promise((resolvePromise, reject) => {
+    const child = spawn(command, args, { stdio: options.interactive ? "inherit" : "pipe" });
+    let stdout = "";
+    let stderr = "";
+    if (!options.interactive) {
+      child.stdout?.on("data", (chunk) => {
+        stdout += String(chunk);
+      });
+      child.stderr?.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+    }
+    if (options.input !== void 0) {
+      child.stdin?.write(options.input);
+      child.stdin?.end();
+    }
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code === 0) resolvePromise({ stdout, stderr });
+      else reject(new Error(stderr.trim() || `Cloudflare command failed with exit code ${code ?? "unknown"}`));
+    });
+  });
+}
+
 // src/lfs-client.ts
 var LFS_JSON = "application/vnd.git-lfs+json";
 var ERROR_SNIPPET_BYTES = 200;
@@ -102,14 +485,14 @@ async function scanPointers(repoPath) {
 }
 async function listTrackedFiles(repoPath) {
   const childProcess = await nodeImport2("node:child_process");
-  const stdout = await new Promise((resolve, reject) => {
+  const stdout = await new Promise((resolve2, reject) => {
     childProcess.execFile("git", ["-C", repoPath, "ls-files", "-z"], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 }, (error, output, stderr) => {
       if (error) {
         reject(new Error(`${error.message}
 ${stderr}`));
         return;
       }
-      resolve(output);
+      resolve2(output);
     });
   });
   return stdout.split("\0").filter((trackedPath) => trackedPath.length > 0);
@@ -214,10 +597,10 @@ async function sha256File(path) {
   const [fs, cryptoModule] = await Promise.all([nodeImport3("node:fs"), nodeImport3("node:crypto")]);
   const hash = cryptoModule.createHash("sha256");
   const stream = fs.createReadStream(path);
-  return await new Promise((resolve, reject) => {
+  return await new Promise((resolve2, reject) => {
     stream.on("data", (chunk) => hash.update(chunk));
     stream.on("error", reject);
-    stream.on("end", () => resolve(hash.digest("hex")));
+    stream.on("end", () => resolve2(hash.digest("hex")));
   });
 }
 async function defaultCreateTempPath() {
@@ -236,14 +619,14 @@ async function setGitConfigValue(repoPath, key, value) {
 }
 async function execGit(repoPath, args) {
   const childProcess = await nodeImport3("node:child_process");
-  return await new Promise((resolve, reject) => {
+  return await new Promise((resolve2, reject) => {
     childProcess.execFile("git", ["-C", repoPath, ...args], { encoding: "utf8" }, (error, stdout, stderr) => {
       if (error) {
         reject(new Error(`${error.message}
 ${stderr}`));
         return;
       }
-      resolve(stdout);
+      resolve2(stdout);
     });
   });
 }
@@ -262,6 +645,7 @@ async function runCli(argv, io = {}) {
   const [command, ...args] = argv;
   if (command === "migrate") return await runMigrate(args, { ...io, stdout: out, stderr: err });
   if (command === "user") return await runUser(args, { ...io, stdout: out, stderr: err });
+  if (command === "worker") return await runWorker(args, { ...io, stdout: out, stderr: err });
   err(`unknown command: ${command}
 
 ${topLevelUsage()}`);
@@ -272,16 +656,57 @@ async function runUser(args, io) {
     io.stdout(userUsage());
     return 0;
   }
-  const parsed = await parseUserArgs(args, io);
+  let parsed;
+  try {
+    parsed = await parseUserArgs(args, io);
+  } catch (error) {
+    io.stderr(`${error instanceof Error ? error.message : String(error)}
+
+${userUsage()}`);
+    return 2;
+  }
   if ("error" in parsed) {
     io.stderr(`${parsed.error}
 
 ${userUsage()}`);
     return 2;
   }
+  if (parsed.options.action === "delete" && !parsed.options.yes && (io.confirm || !io.userRequest)) {
+    const confirmed = await (io.confirm ?? confirmPrompt)(`Delete user "${parsed.options.username}"? [y/N] `);
+    if (!confirmed) {
+      io.stdout("Cancelled.\n");
+      return 0;
+    }
+  }
   try {
     const result = await (io.userRequest ?? requestUser)(parsed.options);
-    io.stdout(formatUserResult(result));
+    io.stdout(formatUserResult(result, parsed.options.json === true));
+    return 0;
+  } catch (error) {
+    io.stderr(`${error instanceof Error ? error.message : String(error)}
+`);
+    return 1;
+  }
+}
+async function runWorker(args, io) {
+  if (args.includes("--help") || args.includes("-h")) {
+    io.stdout(workerUsage());
+    return 0;
+  }
+  const parsed = await parseWorkerArgs(args, io);
+  if ("error" in parsed) {
+    io.stderr(`${parsed.error}
+
+${workerUsage()}`);
+    return 2;
+  }
+  try {
+    const result = await (io.workerDeploy ?? deployWorker)(parsed.options);
+    io.stdout(`Deployed: ${result.endpoint}
+Profile: ${result.profile}
+LFS URL: ${result.endpoint}
+${result.warning ? `Warning: ${result.warning}
+` : ""}`);
     return 0;
   } catch (error) {
     io.stderr(`${error instanceof Error ? error.message : String(error)}
@@ -313,14 +738,22 @@ ${migrateUsage()}`);
 }
 async function parseUserArgs(args, io) {
   const action = args[0];
-  if (action !== "add" && action !== "delete") return { error: "missing user action: add or delete" };
+  if (action !== "add" && action !== "delete" && action !== "list") return { error: "missing user action: add, list, or delete" };
   let targetUrl = "";
   let token;
   let username = "";
   let password;
-  let access = "";
+  let access = action === "add" ? "read" : "";
+  let profileName = "default";
+  let yes = false;
+  let jsonOutput = false;
   for (let index = 1; index < args.length; index += 1) {
     const arg = args[index];
+    if (!arg.startsWith("--")) {
+      if (username) return { error: "duplicate username" };
+      username = arg;
+      continue;
+    }
     if (arg === "--token-stdin") {
       if (token) return { error: "duplicate token source" };
       token = { stdin: true };
@@ -329,6 +762,14 @@ async function parseUserArgs(args, io) {
     if (arg === "--password-stdin") {
       if (password) return { error: "duplicate password source" };
       password = { stdin: true };
+      continue;
+    }
+    if (arg === "--yes") {
+      yes = true;
+      continue;
+    }
+    if (arg === "--json") {
+      jsonOutput = true;
       continue;
     }
     const value = args[index + 1];
@@ -346,24 +787,41 @@ async function parseUserArgs(args, io) {
       const source = envSecret(value);
       if (!source) return { error: `invalid environment variable name: ${value}` };
       password = source;
-    } else if (arg === "--access") access = value;
+    } else if (arg === "--access") {
+      access = value;
+    } else if (arg === "--profile") profileName = value;
     else return { error: `unknown option: ${arg}` };
   }
-  if (!targetUrl) return { error: "missing required option: --target" };
-  if (!token) return { error: "missing required option: --token-env or --token-stdin" };
-  if (!username) return { error: "missing required option: --username" };
-  if (action === "add" && !password) return { error: "missing required option: --password-env or --password-stdin" };
-  if (action === "add" && access !== "read" && access !== "write") return { error: "missing required option: --access read|write" };
+  const explicitTarget = Boolean(targetUrl);
+  const profileStore = io.profileStore ?? createProfileStore(io.env ?? process.env);
+  const profile = explicitTarget ? null : await profileStore.get(profileName);
+  if (!targetUrl) targetUrl = profile?.endpoint || "";
+  if (!token && profile) {
+    const credentialStore = io.credentialStore ?? createCredentialStore();
+    const storedToken = await credentialStore.get(credentialKey(profileName));
+    if (storedToken) token = { value: storedToken };
+  }
+  if (!targetUrl) return { error: "missing profile; deploy a worker first or provide --target" };
+  if (!token) return { error: "missing admin credential; provide --token-env or --token-stdin" };
+  if (action !== "list" && !username) return { error: "missing username" };
+  if (action === "add" && access !== "read" && access !== "write") return { error: "invalid --access read|write" };
   if (isStdinSecret(token) && password && isStdinSecret(password)) return { error: "only one secret may use standard input" };
   try {
+    let resolvedPassword;
+    if (action === "add") {
+      resolvedPassword = password ? await readSecret(password, io) : await (io.readPassword ?? readPassword)("Password: ");
+      if (!resolvedPassword) return { error: "password is empty" };
+    }
     return {
       options: {
         action,
         targetUrl,
         token: await readSecret(token, io),
-        username,
-        password: password ? await readSecret(password, io) : void 0,
-        access: access || void 0
+        username: username || void 0,
+        password: resolvedPassword,
+        access: access || void 0,
+        ...yes ? { yes: true } : {},
+        ...jsonOutput ? { json: true } : {}
       }
     };
   } catch (error) {
@@ -371,9 +829,10 @@ async function parseUserArgs(args, io) {
   }
 }
 async function requestUser(options) {
-  const url = new URL(`/admin/users/${encodeURIComponent(options.username)}`, options.targetUrl.endsWith("/") ? options.targetUrl : `${options.targetUrl}/`);
+  const path = options.action === "list" ? "/admin/users" : `/admin/users/${encodeURIComponent(options.username || "")}`;
+  const url = new URL(path, options.targetUrl.endsWith("/") ? options.targetUrl : `${options.targetUrl}/`);
   const res = await fetch(url, {
-    method: options.action === "add" ? "PUT" : "DELETE",
+    method: options.action === "add" ? "PUT" : options.action === "delete" ? "DELETE" : "GET",
     headers: {
       Authorization: `Bearer ${options.token}`,
       ...options.action === "add" ? { "Content-Type": "application/json" } : {}
@@ -382,7 +841,45 @@ async function requestUser(options) {
   });
   const text = await res.text();
   if (!res.ok) throw new Error(text.trim() || `request failed: ${res.status}`);
-  return JSON.parse(text);
+  const result = JSON.parse(text);
+  if (options.action === "list" && !Array.isArray(result.users)) throw new Error("invalid user list response");
+  return result;
+}
+async function parseWorkerArgs(args, io) {
+  if (args[0] !== "deploy") return { error: "missing worker action: deploy" };
+  let profile = "default";
+  let workerName;
+  let accountId;
+  let adminToken;
+  for (let index = 1; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--token-stdin") {
+      if (adminToken) return { error: "duplicate admin credential source" };
+      adminToken = { stdin: true };
+      continue;
+    }
+    const value = args[index + 1];
+    if (!value || value.startsWith("--")) return { error: `missing value for ${arg}` };
+    index += 1;
+    if (arg === "--profile") profile = value;
+    else if (arg === "--name") workerName = value;
+    else if (arg === "--account-id") {
+      if (!/^[0-9a-f]{32}$/i.test(value)) return { error: "invalid --account-id" };
+      accountId = value;
+    } else if (arg === "--token-env") {
+      if (adminToken) return { error: "duplicate admin credential source" };
+      const source = envSecret(value);
+      if (!source) return { error: `invalid environment variable name: ${value}` };
+      adminToken = source;
+    } else return { error: `unknown option: ${arg}` };
+  }
+  let adminSecret;
+  try {
+    if (adminToken) adminSecret = await readSecret(adminToken, io);
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+  return { action: "deploy", options: { profile, workerName, accountId, adminSecret } };
 }
 async function parseMigrateArgs(args, defaultRepoPath, io) {
   const sourceHeaderSources = [];
@@ -449,6 +946,7 @@ function isStdinSecret(source) {
   return "stdin" in source;
 }
 async function readSecret(source, io) {
+  if ("value" in source) return source.value;
   if ("env" in source) {
     const value2 = (io.env ?? process.env)[source.env];
     if (!value2) throw new Error(`missing environment variable: ${source.env}`);
@@ -475,8 +973,9 @@ function topLevelUsage() {
   return `Usage: git-me <command>
 
 Commands:
-  migrate  migrate Git LFS objects to git-me
+  worker   deploy a zero-config git-me Worker
   user     manage git-me LFS users
+  migrate  migrate Git LFS objects to git-me
 `;
 }
 function migrateUsage() {
@@ -492,12 +991,30 @@ Options:
 `;
 }
 function userUsage() {
-  return `Usage: git-me user <add|delete> --target <url> (--token-env <name>|--token-stdin) --username <name> [options]
+  return `Usage: git-me user <add|delete> [username] [options]
+       git-me user list [options]
 
 Options:
+  --profile <name>       local profile (default: default)
+  --target <url>         Worker URL (default: saved profile)
+  --token-env <name>     env var containing admin token
+  --token-stdin          read admin token from standard input
   --password-env <name>  env var containing password for add
   --password-stdin       read password for add from standard input
-  --access <read|write>  access for add
+  --access <read|write>  access for add (default: read)
+  --yes                  skip delete confirmation
+  --json                 output user list as JSON
+`;
+}
+function workerUsage() {
+  return `Usage: git-me worker deploy [options]
+
+Options:
+  --profile <name>       local profile name (default: default)
+  --name <name>          Worker name (default: generated)
+  --account-id <id>      Cloudflare account ID
+  --token-stdin          use an admin secret from standard input
+  --token-env <name>     use an admin secret from an environment variable
 `;
 }
 function formatResult(result) {
@@ -506,11 +1023,74 @@ function formatResult(result) {
   return `${lines.join("\n")}
 `;
 }
-function formatUserResult(result) {
+function formatUserResult(result, jsonOutput = false) {
+  if (result.users) {
+    if (jsonOutput) return `${JSON.stringify(result.users)}
+`;
+    if (result.users.length === 0) return "USERNAME  ACCESS\n";
+    const width = Math.max("USERNAME".length, ...result.users.map((user) => user.username.length));
+    return [`${"USERNAME".padEnd(width)}  ACCESS`, ...result.users.map((user) => `${user.username.padEnd(width)}  ${user.access}`)].join("\n") + "\n";
+  }
   if (result.deleted) return `username=${result.username} deleted=true
 `;
   return `username=${result.username} access=${result.access}
 `;
+}
+async function confirmPrompt(prompt) {
+  const value = await ioReadLine(prompt);
+  return /^y(?:es)?$/i.test(value.trim());
+}
+async function ioReadLine(prompt) {
+  const readline = await import("node:readline/promises");
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return await rl.question(prompt);
+  } finally {
+    rl.close();
+  }
+}
+async function readPassword(prompt) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("password prompt unavailable; use --password-stdin");
+  const stdin = process.stdin;
+  const stdout = process.stdout;
+  stdout.write(prompt);
+  stdin.setRawMode(true);
+  stdin.resume();
+  return await new Promise((resolve2, reject) => {
+    const bytes = [];
+    const onData = (chunk) => {
+      for (const byte of chunk) {
+        if (byte === 3) {
+          cleanup();
+          reject(new Error("password prompt cancelled"));
+          return;
+        }
+        if (byte === 13 || byte === 10) {
+          cleanup();
+          stdout.write("\n");
+          resolve2(Buffer.from(bytes).toString("utf8"));
+          return;
+        }
+        if (byte === 127 || byte === 8) {
+          removeLastUtf8CodePoint(bytes);
+          continue;
+        }
+        bytes.push(byte);
+      }
+    };
+    const cleanup = () => {
+      stdin.off("data", onData);
+      stdin.setRawMode(false);
+      stdin.pause();
+    };
+    stdin.on("data", onData);
+  });
+}
+function removeLastUtf8CodePoint(bytes) {
+  if (bytes.length === 0) return;
+  let index = bytes.length - 1;
+  while (index > 0 && (bytes[index] & 192) === 128) index -= 1;
+  bytes.splice(index);
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   runCli(process.argv.slice(2)).then((code) => {

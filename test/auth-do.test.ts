@@ -34,17 +34,38 @@ class MemoryKV {
   }
 }
 
-function makeAuth(): { auth: AuthUser; storage: MemoryStorage; kv: MemoryKV } {
+function makeState(storage: MemoryStorage): DurableObjectState {
+  let previous = Promise.resolve();
+  return {
+    storage,
+    blockConcurrencyWhile: <T>(callback: () => Promise<T>): Promise<T> => {
+      const result = previous.then(callback, callback);
+      previous = result.then(() => undefined, () => undefined);
+      return result;
+    },
+  } as unknown as DurableObjectState;
+}
+
+function makeAuth(): { auth: AuthUser; registry: AuthUser; storage: MemoryStorage; registryStorage: MemoryStorage; kv: MemoryKV } {
   const storage = new MemoryStorage();
+  const registryStorage = new MemoryStorage();
   const kv = new MemoryKV();
+  let registry: AuthUser;
   const env: Env = {
     GITME_AUTH_TOKEN: 'token',
     GITME_R2: {} as R2Bucket,
     GITME_KV: kv as unknown as KVNamespace,
-    GITME_AUTH: {} as DurableObjectNamespace,
+    GITME_AUTH: {
+      getByName: (name: string) => ({
+        fetch: async (request: Request) => {
+          if (name !== 'admin:users') throw new Error('unexpected Durable Object');
+          return await registry.fetch(request);
+        },
+      }),
+    } as unknown as DurableObjectNamespace,
   };
-  const state = { storage, blockConcurrencyWhile: async <T>(callback: () => Promise<T>) => await callback() } as unknown as DurableObjectState;
-  return { auth: new AuthUser(state, env), storage, kv };
+  registry = new AuthUser(makeState(registryStorage), env);
+  return { auth: new AuthUser(makeState(storage), env), registry, storage, registryStorage, kv };
 }
 
 async function call(auth: AuthUser, body: Record<string, unknown>): Promise<{ ok: boolean; access?: string }> {
@@ -64,7 +85,7 @@ async function sha256Hex(value: string): Promise<string> {
 
 describe('AuthUser', () => {
   test('stores salted PBKDF2 records and authenticates them', async () => {
-    const { auth, storage, kv } = makeAuth();
+    const { auth, storage, registryStorage, kv } = makeAuth();
     const password = 'correct horse battery staple';
 
     await expect(call(auth, { action: 'create', username: 'alice', password, access: 'write' })).resolves.toEqual({ ok: true, access: 'write' });
@@ -74,18 +95,20 @@ describe('AuthUser', () => {
     expect(record.password).toBeUndefined();
     expect(record.password_sha256).toBeUndefined();
     expect(kv.values.has('user:alice')).toBe(false);
+    expect(registryStorage.values.get('users')).toEqual([{ username: 'alice', access: 'write' }]);
     await expect(call(auth, { action: 'authenticate', username: 'alice', password })).resolves.toEqual({ ok: true, access: 'write' });
     await expect(call(auth, { action: 'authenticate', username: 'alice', password: 'wrong password' })).resolves.toEqual({ ok: false });
   });
 
   test('upgrades one successful legacy login and tombstones deleted users', async () => {
-    const { auth, storage, kv } = makeAuth();
+    const { auth, storage, registryStorage, kv } = makeAuth();
     const password = 'correct horse battery staple';
     await kv.put('user:alice', JSON.stringify({ password_sha256: await sha256Hex(password), access: 'read' }));
 
     await expect(call(auth, { action: 'authenticate', username: 'alice', password })).resolves.toEqual({ ok: true, access: 'read' });
     expect(storage.values.get('record')).toMatchObject({ version: 1, access: 'read' });
     expect(kv.values.has('user:alice')).toBe(false);
+    expect(registryStorage.values.get('users')).toEqual([{ username: 'alice', access: 'read' }]);
 
     await expect(call(auth, { action: 'delete', username: 'alice' })).resolves.toEqual({ ok: true });
     await kv.put('user:alice', JSON.stringify({ password_sha256: await sha256Hex(password), access: 'read' }));
@@ -101,5 +124,19 @@ describe('AuthUser', () => {
       await expect(call(auth, { action: 'authenticate', username: 'alice', password: 'wrong password' })).resolves.toEqual({ ok: false });
     }
     await expect(call(auth, { action: 'authenticate', username: 'alice', password })).resolves.toEqual({ ok: false });
+  });
+
+  test('serializes concurrent registry updates without credential data', async () => {
+    const { registry, registryStorage } = makeAuth();
+    await Promise.all(['alice', 'bob', 'carol'].map(async (username, index) => {
+      await call(registry, { action: 'upsert', username, access: index === 0 ? 'write' : 'read' });
+    }));
+
+    expect(registryStorage.values.get('users')).toEqual([
+      { username: 'alice', access: 'write' },
+      { username: 'bob', access: 'read' },
+      { username: 'carol', access: 'read' },
+    ]);
+    expect(JSON.stringify(registryStorage.values.get('users'))).not.toMatch(/password|hash/i);
   });
 });

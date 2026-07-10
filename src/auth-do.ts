@@ -1,7 +1,8 @@
-import type { UserAccess } from './auth';
+import { updateUserIndex, type UserAccess } from './auth';
 import type { Env } from './worker';
 
 const RECORD_KEY = 'record';
+const USERS_KEY = 'users';
 const ATTEMPTS_PREFIX = 'attempts:';
 const PBKDF2_ITERATIONS = 600_000;
 const MAX_FAILURES = 5;
@@ -13,6 +14,7 @@ type UserRecord = {
   access: UserAccess;
   salt: string;
   hash: string;
+  indexed?: true;
 };
 
 type DeletedRecord = { version: 1; deleted: true };
@@ -21,7 +23,12 @@ type Attempts = { count: number; windowStartedAt: number; lockedUntil: number };
 type AuthRequest =
   | { action: 'create'; username: string; password: string; access: UserAccess }
   | { action: 'delete'; username: string }
-  | { action: 'authenticate'; username: string; password: string; source: string };
+  | { action: 'authenticate'; username: string; password: string; source: string }
+  | { action: 'upsert'; username: string; access: UserAccess }
+  | { action: 'remove'; username: string }
+  | { action: 'list' };
+
+type IndexedUser = { username: string; access: UserAccess };
 
 type LegacyUserRecord = { password_sha256?: unknown; access?: unknown };
 
@@ -43,6 +50,8 @@ export class AuthUser {
     }
 
     if (!isAuthRequest(input)) return response(400, { ok: false });
+    if (input.action === 'list') return response(200, { ok: true, users: await this.readUsers() });
+    if (input.action === 'upsert' || input.action === 'remove') return await this.updateUsers(input);
     if (input.action === 'create') return await this.create(input);
     if (input.action === 'delete') return await this.remove(input);
     return await this.authenticate(input);
@@ -50,14 +59,18 @@ export class AuthUser {
 
   private async create(input: Extract<AuthRequest, { action: 'create' }>): Promise<Response> {
     if (input.password.length < 12 || input.password.length > 1024) return response(400, { ok: false });
-    await this.state.storage.put(RECORD_KEY, await createRecord(input.password, input.access));
+    const record = await createRecord(input.password, input.access);
+    await this.state.storage.put(RECORD_KEY, record);
     await this.env.GITME_KV.delete(`user:${input.username}`);
+    await updateUserIndex(this.env, input.username, input.access);
+    await this.state.storage.put(RECORD_KEY, { ...record, indexed: true });
     return response(200, { ok: true, access: input.access });
   }
 
   private async remove(input: Extract<AuthRequest, { action: 'delete' }>): Promise<Response> {
     await this.state.storage.put(RECORD_KEY, { version: 1, deleted: true } satisfies DeletedRecord);
     await this.env.GITME_KV.delete(`user:${input.username}`);
+    await updateUserIndex(this.env, input.username);
     return response(200, { ok: true });
   }
 
@@ -68,6 +81,10 @@ export class AuthUser {
     if (stored && !('deleted' in stored)) {
       if (await verifyPassword(input.password, stored)) {
         await this.state.storage.delete(attemptKey(input.source));
+        if (!stored.indexed) {
+          await updateUserIndex(this.env, input.username, stored.access);
+          await this.state.storage.put(RECORD_KEY, { ...stored, indexed: true });
+        }
         return response(200, { ok: true, access: stored.access });
       }
       await this.recordFailure(input.source);
@@ -79,15 +96,38 @@ export class AuthUser {
     if (legacy && await legacyPasswordMatches(input.password, legacy.password_sha256)) {
       const access = legacy.access === 'write' ? 'write' : legacy.access === 'read' ? 'read' : null;
       if (access) {
-        await this.state.storage.put(RECORD_KEY, await createRecord(input.password, access));
+        const record = await createRecord(input.password, access);
+        await this.state.storage.put(RECORD_KEY, record);
         await this.state.storage.delete(attemptKey(input.source));
         await this.env.GITME_KV.delete(`user:${input.username}`);
+        await updateUserIndex(this.env, input.username, access);
+        await this.state.storage.put(RECORD_KEY, { ...record, indexed: true });
         return response(200, { ok: true, access });
       }
     }
 
     if (legacy) await this.recordFailure(input.source);
     return response(200, { ok: false });
+  }
+
+  private async updateUsers(input: Extract<AuthRequest, { action: 'upsert' | 'remove' }>): Promise<Response> {
+    const users = await this.readUsers();
+    const existing = users.findIndex((user) => user.username === input.username);
+    if (input.action === 'remove') {
+      if (existing >= 0) users.splice(existing, 1);
+    } else if (existing >= 0) {
+      users[existing] = { username: input.username, access: input.access };
+    } else {
+      users.push({ username: input.username, access: input.access });
+    }
+    users.sort((left, right) => left.username.localeCompare(right.username));
+    await this.state.storage.put(USERS_KEY, users);
+    return response(200, { ok: true });
+  }
+
+  private async readUsers(): Promise<IndexedUser[]> {
+    const users = await this.state.storage.get<unknown>(USERS_KEY);
+    return Array.isArray(users) ? users.filter(isIndexedUser).sort((left, right) => left.username.localeCompare(right.username)) : [];
   }
 
   private async legacyRecord(username: string): Promise<LegacyUserRecord | null> {
@@ -119,10 +159,18 @@ export class AuthUser {
 }
 
 function isAuthRequest(value: unknown): value is AuthRequest {
-  if (!isRecord(value) || typeof value.action !== 'string' || typeof value.username !== 'string') return false;
+  if (!isRecord(value) || typeof value.action !== 'string') return false;
+  if (value.action === 'list') return true;
+  if (typeof value.username !== 'string') return false;
+  if (value.action === 'remove') return true;
+  if (value.action === 'upsert') return value.access === 'read' || value.access === 'write';
   if (value.action === 'delete') return true;
   if (value.action === 'authenticate') return typeof value.password === 'string' && typeof value.source === 'string' && value.source.length > 0 && value.source.length <= 64;
   return value.action === 'create' && typeof value.password === 'string' && (value.access === 'read' || value.access === 'write');
+}
+
+function isIndexedUser(value: unknown): value is IndexedUser {
+  return isRecord(value) && typeof value.username === 'string' && (value.access === 'read' || value.access === 'write');
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

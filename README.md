@@ -1,16 +1,51 @@
 # git-me
 
-A small self-hosted Git LFS utility for Cloudflare Workers, R2, Durable Objects, and KV-backed legacy-user migration.
+A zero-config self-hosted Git LFS service for Cloudflare Workers, R2, Durable Objects, and KV-backed legacy-user migration.
 
 Built as a TypeScript Cloudflare Worker.
 
-## Requirements
+## Zero-Config Quick Start
 
-- Node.js 22+
-- Wrangler CLI or project-local `wrangler`
-- Cloudflare account with Workers, R2, KV, and Durable Objects enabled
+Requires Node.js 22+ and a Cloudflare account. Wrangler is bundled as the deploy engine; users do not need to install or configure it.
 
-## Quick Start
+```bash
+npm install -g @0xordek/git-me
+git-me worker deploy
+```
+
+The command opens Cloudflare login, creates the Worker, R2 bucket, KV namespace, and Durable Object migration, generates the admin secret, stores it in the operating system credential store, checks `/health`, and saves a local profile.
+
+Use `--account-id <id>` when Cloudflare login has more than one account. A profile name cannot be deployed twice; use another `--profile <name>` for another Worker.
+
+Example output:
+
+```text
+Deployed: https://git-me-abc.workers.dev
+Profile: default
+LFS URL: https://git-me-abc.workers.dev
+```
+
+Add and manage users without copying Worker URLs or admin tokens:
+
+```bash
+git-me user add 0xordek --access write
+git-me user list
+git-me user list --json
+git-me user delete 0xordek
+```
+
+Passwords are read from a hidden prompt. For automation, use stdin; secrets are never accepted as command arguments:
+
+```bash
+printf '%s' "$LFS_PASSWORD" | git-me user add 0xordek --access write --password-stdin
+git-me user delete 0xordek --yes
+```
+
+If the operating system credential store is unavailable, pass the admin secret explicitly with `--token-stdin` or `--token-env`.
+
+Existing users created before user listing are added to the list after their next successful login; Durable Objects cannot enumerate them safely.
+
+## Quick Start (development)
 
 ```bash
 git clone git@github.com:0xordek/git-me.git
@@ -19,7 +54,9 @@ npm ci
 npm run check
 ```
 
-## Cloudflare Setup
+## Manual Cloudflare Setup (development/legacy)
+
+The zero-config path above is recommended for users. The manual setup remains useful for local Worker development and existing deployments.
 
 Create storage resources:
 
@@ -76,7 +113,7 @@ npm run deploy
 
 ## Git LFS Client Setup
 
-Create a user as the deploy admin. Pass secrets through environment variables or standard input, never command arguments:
+For the zero-config flow, use the profile-based commands above. The explicit URL/token form remains available for another machine or when the credential store is unavailable; pass secrets through environment variables or standard input, never command arguments:
 
 ```bash
 read -rsp 'Admin token: ' GITME_ADMIN_TOKEN; echo
@@ -125,7 +162,7 @@ Then use `git push` and `git pull` as normal. On first LFS access, Git asks for 
 
 The admin bearer token also works for LFS as an emergency write credential, but normal users should use Basic auth users created through `/admin/users/{username}`.
 
-If you do not want the CLI, the same operations are available through `PUT` and `DELETE /admin/users/{username}`.
+If you do not want the CLI, the same operations are available through `GET /admin/users`, `PUT /admin/users/{username}`, and `DELETE /admin/users/{username}`.
 
 ## Migrating Existing LFS Objects
 
@@ -204,6 +241,7 @@ Safety model: the CLI uses the generic Git LFS Batch API for source downloads an
 | PUT | `/objects/{oid}` | Upload object bytes |
 | GET | `/objects/{oid}` | Download object bytes |
 | PUT | `/admin/users/{username}` | Create or update LFS user |
+| GET | `/admin/users` | List usernames and access levels |
 | DELETE | `/admin/users/{username}` | Delete LFS user |
 | GET | `/health` | Configuration health check |
 
@@ -214,7 +252,7 @@ Batch requests and error responses use `application/vnd.git-lfs+json`.
 
 - R2 object key: `objects/<oid>`
 - Temporary proxy-upload key prefix: `objects/.tmp/`
-- Durable Object: one `AuthUser` instance per normalized username
+- Durable Object: one `AuthUser` instance per normalized username, plus reserved `admin:users` instance for the serialized admin index
 - KV user key: `user:<username>` only during legacy SHA-256 credential upgrade
 
 ## Development

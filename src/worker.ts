@@ -1,7 +1,7 @@
 import { ConfigError, healthResponse, loadConfig } from './config';
 import type { AppConfig } from './config';
 import { presignR2Url } from './signing';
-import { authenticateUser, createUser, deleteUser, type UserAccess } from './auth';
+import { authenticateUser, createUser, deleteUser, listUsers, type UserAccess } from './auth';
 
 export { AuthUser } from './auth-do';
 
@@ -59,6 +59,7 @@ export default {
         if (error instanceof ConfigError) return lfsError(500, 'configuration error');
         throw error;
       }
+      if (url.pathname === '/admin/users') return handleAdminUsers(request, env, config);
       if (url.pathname.startsWith('/admin/users/')) return handleAdminUser(request, env, config, url.pathname.slice('/admin/users/'.length));
 
       if (url.pathname === '/objects/batch') {
@@ -218,6 +219,12 @@ async function handleAdminUser(request: Request, env: Env, config: AppConfig, ra
   }
 
   return appJson(405, { message: 'method not allowed' });
+}
+
+async function handleAdminUsers(request: Request, env: Env, config: AppConfig): Promise<Response> {
+  if (request.headers.get('Authorization') !== `Bearer ${config.authToken}`) return appJson(401, { message: 'authentication required' });
+  if (request.method !== 'GET') return appJson(405, { message: 'method not allowed' });
+  return appJson(200, { users: await listUsers(env) });
 }
 
 async function handleDownload(env: Env, oid: string): Promise<Response> {

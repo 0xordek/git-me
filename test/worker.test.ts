@@ -61,21 +61,37 @@ type MemoryUser = { password: string; access: 'read' | 'write'; deleted?: boolea
 
 class MemoryAuth {
   readonly users = new Map<string, MemoryUser>();
+  readonly index = new Map<string, 'read' | 'write'>();
 
   readonly namespace = {
     getByName: (username: string) => ({
       fetch: async (request: Request): Promise<Response> => {
-        const body = await request.json() as { action: string; password?: string; access?: 'read' | 'write' };
+        const body = await request.json() as { action: string; username?: string; password?: string; access?: 'read' | 'write' };
+        if (username === 'admin:users') {
+          if (body.action === 'list') return Response.json({ ok: true, users: [...this.index].map(([username, access]) => ({ username, access })).sort((left, right) => left.username.localeCompare(right.username)) });
+          if (body.action === 'upsert' && body.access) {
+            if (body.username) this.index.set(body.username, body.access);
+            return Response.json({ ok: true });
+          }
+          if (body.action === 'remove') {
+            if (body.username) this.index.delete(body.username);
+            return Response.json({ ok: true });
+          }
+        }
         if (body.action === 'create' && body.password && body.access) {
           this.users.set(username, { password: body.password, access: body.access });
+          this.index.set(username, body.access);
           return Response.json({ ok: true, access: body.access });
         }
         if (body.action === 'delete') {
           this.users.set(username, { password: '', access: 'read', deleted: true });
+          this.index.delete(username);
           return Response.json({ ok: true });
         }
         const user = this.users.get(username);
-        return Response.json({ ok: Boolean(user && !user.deleted && user.password === body.password), access: user?.access });
+        const ok = Boolean(user && !user.deleted && user.password === body.password);
+        if (ok && user) this.index.set(username, user.access);
+        return Response.json({ ok, access: user?.access });
       },
     }),
   } as DurableObjectNamespace;
@@ -360,6 +376,30 @@ describe('worker', () => {
     const res = await worker.fetch(req, e, {} as ExecutionContext);
     expect(create.status).toBe(200);
     expect(res.status).toBe(200);
+  });
+
+  test('admin user registry retains concurrent mutations without password data', async () => {
+    const e = env();
+    const alice = worker.fetch(new Request('https://example.com/admin/users/alice', {
+      method: 'PUT',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ password: 'correct horse alice', access: 'write' }),
+    }), e, {} as ExecutionContext);
+    const bob = worker.fetch(new Request('https://example.com/admin/users/bob', {
+      method: 'PUT',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ password: 'correct horse bob', access: 'read' }),
+    }), e, {} as ExecutionContext);
+    await Promise.all([alice, bob]);
+
+    const listed = await worker.fetch(new Request('https://example.com/admin/users', { headers: authHeaders() }), e, {} as ExecutionContext);
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toEqual({ users: [{ username: 'alice', access: 'write' }, { username: 'bob', access: 'read' }] });
+    expect(await e.GITME_KV.get('admin:users')).toBeNull();
+
+    await worker.fetch(new Request('https://example.com/admin/users/alice', { method: 'DELETE', headers: authHeaders() }), e, {} as ExecutionContext);
+    const afterDelete = await worker.fetch(new Request('https://example.com/admin/users', { headers: authHeaders() }), e, {} as ExecutionContext);
+    expect(await afterDelete.json()).toEqual({ users: [{ username: 'bob', access: 'read' }] });
   });
 
   test('read user can download but cannot upload', async () => {
