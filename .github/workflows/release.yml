@@ -13,17 +13,18 @@ jobs:
   verify-and-release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
-          node-version: '22'
-          cache: npm
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
       - run: npm ci
       - run: npm run check
       - run: test "v$(node -p \"require('./package.json').version\")" = "$GITHUB_REF_NAME"
       - run: |
           VERSION=$(node -p "require('./package.json').version")
-          npm view "@0xordek/git-me@$VERSION" version >/dev/null 2>&1 || npm publish --provenance --access public
+          npm view "@0xordek/git-me@$VERSION" version >/dev/null 2>&1 || npm publish --access public
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
