@@ -1,4 +1,5 @@
-import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { createCredentialStore, type CredentialStore } from './credentials';
 import { deployWorker, credentialKey, type DeployOptions, type DeployResult } from './deploy';
 import { migrate, type MigrateOptions, type MigrationResult } from './migrate';
@@ -492,7 +493,18 @@ function removeLastUtf8CodePoint(bytes: number[]): void {
   bytes.splice(index);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+function isMainEntry(): boolean {
+  const argvPath = process.argv[1];
+  if (!argvPath) return false;
+
+  try {
+    return realpathSync(argvPath) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isMainEntry()) {
   runCli(process.argv.slice(2)).then((code) => {
     process.exitCode = code;
   }, (error) => {

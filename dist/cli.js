@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 // src/cli.ts
-import { pathToFileURL } from "node:url";
+import { realpathSync } from "node:fs";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // src/credentials.ts
 import { execFile } from "node:child_process";
@@ -1092,7 +1093,16 @@ function removeLastUtf8CodePoint(bytes) {
   while (index > 0 && (bytes[index] & 192) === 128) index -= 1;
   bytes.splice(index);
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+function isMainEntry() {
+  const argvPath = process.argv[1];
+  if (!argvPath) return false;
+  try {
+    return realpathSync(argvPath) === realpathSync(fileURLToPath2(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+if (isMainEntry()) {
   runCli(process.argv.slice(2)).then((code) => {
     process.exitCode = code;
   }, (error) => {

@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.4.1 - 2026-07-11
+
+- Fixed npm-installed CLI commands silently exiting when launched through symlinked bin paths.
+- Added direct and symlinked CLI entrypoint regression coverage.
+
 ## 0.4.0 - 2026-07-10
 
 - Added zero-config `worker deploy` with packaged Worker bundle, resource provisioning, health checks, and local profiles.
