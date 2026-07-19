@@ -1,6 +1,6 @@
 name = "git-me"
 main = "src/worker.ts"
-compatibility_date = "2026-07-07"
+compatibility_date = "2026-07-12"
 workers_dev = true
 
 [[r2_buckets]]
@@ -19,3 +19,14 @@ class_name = "AuthUser"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["AuthUser"]
+
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 0.01

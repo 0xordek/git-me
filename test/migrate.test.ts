@@ -128,6 +128,17 @@ describe('migrate', () => {
     expect(deps.createClient).not.toHaveBeenCalled();
   });
 
+  test('reports conflicting sizes for one oid and blocks config writes', async () => {
+    const oid = 'd'.repeat(64);
+    const deps = fakeDeps([pointer(oid, 3, 'one.bin'), pointer(oid, 4, 'two.bin')], []);
+    await expect(migrate({
+      repoPath: '/repo', sourceHeaders: {}, targetUrl: 'https://target.example/lfs', targetToken: 'token', concurrency: 1, dryRun: true, writeConfig: true,
+    }, deps)).resolves.toEqual({
+      scanned: 2, unique: 1, migrated: 0, skipped: 1, failed: [{ oid, reason: 'conflicting pointer sizes: 3, 4' }],
+    });
+    expect(deps.setGitConfig).not.toHaveBeenCalled();
+  });
+
   test('downloads, verifies, uploads, then checks target download action', async () => {
     const bytes = new TextEncoder().encode('payload');
     const oid = await sha256Hex(bytes);
@@ -154,7 +165,7 @@ describe('migrate', () => {
     expect(source.downloads).toEqual([{ href: 'https://source/object', filePath: expect.any(String), headers: { 'X-Source': '1' } }]);
     expect(target.batchCalls).toEqual([{ operation: 'upload', objects: [object] }, { operation: 'download', objects: [object] }]);
     expect(target.uploads).toEqual([{ href: 'https://target/upload', filePath: expect.any(String), headers: { 'X-Upload': '1' } }]);
-    await expectFileMissing(source.downloads[0].filePath);
+    await expectFileMissing(source.downloads[0]!.filePath);
   });
 
   test('records hash mismatch without uploading', async () => {

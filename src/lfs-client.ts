@@ -1,3 +1,10 @@
+import { createReadStream, createWriteStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
+import { assertSafeUrl } from './url';
+
 export type LfsObject = { oid: string; size: number };
 export type HeaderMap = Record<string, string>;
 
@@ -19,15 +26,6 @@ export type LfsBatchResponse = {
 
 const LFS_JSON = 'application/vnd.git-lfs+json';
 const ERROR_SNIPPET_BYTES = 200;
-const nodeImport = <T>(specifier: string): Promise<T> => import(/* @vite-ignore */ specifier) as Promise<T>;
-
-type FsModule = {
-  createReadStream(path: string): unknown;
-  createWriteStream(path: string): unknown;
-};
-type FsPromises = { stat(path: string): Promise<{ size: number }> };
-type StreamModule = { Readable: { fromWeb(stream: ReadableStream<Uint8Array>): unknown } };
-type StreamPromises = { pipeline(source: unknown, destination: unknown): Promise<void> };
 
 export function mergeActionHeaders(base: HeaderMap, actionHeaders?: HeaderMap): HeaderMap {
   return { ...base, ...(actionHeaders ?? {}) };
@@ -39,6 +37,7 @@ export class LfsClient {
   private readonly headers: HeaderMap;
 
   constructor(options: { baseUrl: string; headers?: HeaderMap }) {
+    assertSafeUrl(options.baseUrl, Object.keys(options.headers ?? {}).length > 0);
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
     this.baseOrigin = new URL(this.baseUrl).origin;
     this.headers = options.headers ?? {};
@@ -59,23 +58,15 @@ export class LfsClient {
     const response = await fetch(href, { method: 'GET', headers: this.actionHeaders(href, headers) });
     await throwIfFailed(response, 'LFS download');
     if (!response.body) throw new Error('LFS download failed: response body missing');
-
-    const [fs, stream, streamPromises] = await Promise.all([
-      nodeImport<FsModule>('node:fs'),
-      nodeImport<StreamModule>('node:stream'),
-      nodeImport<StreamPromises>('node:stream/promises'),
-    ]);
-
-    await streamPromises.pipeline(stream.Readable.fromWeb(response.body), fs.createWriteStream(filePath));
+    await pipeline(Readable.fromWeb(response.body as NodeReadableStream), createWriteStream(filePath, { flags: 'wx', mode: 0o600 }));
   }
 
   async uploadFromFile(href: string, filePath: string, headers?: HeaderMap): Promise<void> {
-    const [fs, fsPromises] = await Promise.all([nodeImport<FsModule>('node:fs'), nodeImport<FsPromises>('node:fs/promises')]);
-    const stat = await fsPromises.stat(filePath);
+    const size = (await stat(filePath)).size;
     const init = {
       method: 'PUT',
-      headers: { ...this.actionHeaders(href, headers), 'Content-Length': String(stat.size) },
-      body: fs.createReadStream(filePath) as BodyInit,
+      headers: { ...this.actionHeaders(href, headers), 'Content-Length': String(size) },
+      body: createReadStream(filePath) as never,
       duplex: 'half',
     } as RequestInit;
 
@@ -85,15 +76,14 @@ export class LfsClient {
 
   private actionHeaders(href: string, headers?: HeaderMap): HeaderMap {
     const actionOrigin = new URL(href, this.baseUrl).origin;
-    if (actionOrigin !== this.baseOrigin) return headers ?? {};
-    return mergeActionHeaders(this.headers, headers);
+    const result = actionOrigin === this.baseOrigin ? mergeActionHeaders(this.headers, headers) : headers ?? {};
+    assertSafeUrl(new URL(href, this.baseUrl).href, true);
+    return result;
   }
 }
 
 async function throwIfFailed(response: Response, label: string): Promise<void> {
   if (response.ok) return;
-
   const body = await response.text().catch(() => '');
-  const snippet = body.slice(0, ERROR_SNIPPET_BYTES);
-  throw new Error(`${label} failed with status ${response.status}: ${snippet}`);
+  throw new Error(`${label} failed with status ${response.status}: ${body.slice(0, ERROR_SNIPPET_BYTES)}`);
 }

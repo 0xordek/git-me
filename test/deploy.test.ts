@@ -15,8 +15,9 @@ describe('deployWorker', () => {
       const runCommand = vi.fn(async (args: string[]) => {
         commands.push(args);
         const configPath = args[args.indexOf('--config') + 1];
+        if (!configPath && args[0] === 'secret') throw new Error('missing config path');
         if (args[0] === 'deploy') return { stdout: 'https://worker.example.workers.dev\n', stderr: '' };
-        if (args[0] === 'secret') config = await readFile(configPath, 'utf8');
+        if (args[0] === 'secret') config = await readFile(configPath!, 'utf8');
         if (args[0] === 'kv') return { stdout: 'id = "1234567890abcdef1234567890abcdef"', stderr: '' };
         return { stdout: 'account 1234567890abcdef1234567890abcdef', stderr: '' };
       });
@@ -45,6 +46,8 @@ describe('deployWorker', () => {
         ['login'], ['whoami'], ['r2', 'bucket'], ['kv', 'namespace'], ['deploy', '--config'], ['secret', 'put'],
       ]);
       expect(config).toContain('account_id = "1234567890abcdef1234567890abcdef"');
+      expect(config).toContain('[observability.traces]');
+      expect(config).toContain('head_sampling_rate = 0.01');
     } finally {
       await rm(temp, { recursive: true, force: true });
     }

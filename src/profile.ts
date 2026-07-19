@@ -19,7 +19,6 @@ export type ProfileStore = {
 
 type ProfileFile = {
   version: 1;
-  current: string;
   profiles: Record<string, WorkerProfile>;
 };
 
@@ -39,7 +38,6 @@ class FileProfileStore implements ProfileStore {
   async save(profile: WorkerProfile): Promise<void> {
     const file = await readProfileFile(this.filePath);
     file.profiles[profile.name] = profile;
-    file.current = profile.name;
     await mkdir(dirname(this.filePath), { recursive: true, mode: 0o700 });
     const temporaryPath = `${this.filePath}.tmp`;
     await writeFile(temporaryPath, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
@@ -54,11 +52,10 @@ async function readProfileFile(filePath: string): Promise<ProfileFile> {
     if (parsed.version !== 1 || !parsed.profiles || typeof parsed.profiles !== 'object') throw new Error(`invalid profile file: ${filePath}`);
     return {
       version: 1,
-      current: typeof parsed.current === 'string' ? parsed.current : 'default',
       profiles: parsed.profiles as Record<string, WorkerProfile>,
     };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, current: 'default', profiles: {} };
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, profiles: {} };
     if (error instanceof SyntaxError) throw new Error(`invalid profile file: ${filePath}`);
     throw error;
   }

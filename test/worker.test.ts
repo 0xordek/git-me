@@ -14,12 +14,16 @@ const signing: R2SigningConfig = {
 
 class MemoryR2 {
   readonly objects = new Map<string, { bytes: Uint8Array<ArrayBuffer>; customMetadata?: Record<string, string> }>();
+  readonly deleteCalls: string[] = [];
+  failPut: ((key: string) => boolean) | null = null;
+  failDelete = false;
 
   async put(
     key: string,
     value: ReadableStream | string | ArrayBuffer | ArrayBufferView | Blob,
     options?: { customMetadata?: Record<string, string> },
   ): Promise<void> {
+    if (this.failPut?.(key)) throw new Error(`put failed: ${key}`);
     const bytes: Uint8Array<ArrayBuffer> = new Uint8Array(await new Response(value as BodyInit).arrayBuffer());
     this.objects.set(key, { bytes, customMetadata: options?.customMetadata });
   }
@@ -37,6 +41,8 @@ class MemoryR2 {
   }
 
   async delete(key: string): Promise<void> {
+    this.deleteCalls.push(key);
+    if (this.failDelete) throw new Error(`delete failed: ${key}`);
     this.objects.delete(key);
   }
 }
@@ -63,38 +69,27 @@ class MemoryAuth {
   readonly users = new Map<string, MemoryUser>();
   readonly index = new Map<string, 'read' | 'write'>();
 
-  readonly namespace = {
+  readonly namespace: Env['GITME_AUTH'] = {
     getByName: (username: string) => ({
-      fetch: async (request: Request): Promise<Response> => {
-        const body = await request.json() as { action: string; username?: string; password?: string; access?: 'read' | 'write' };
-        if (username === 'admin:users') {
-          if (body.action === 'list') return Response.json({ ok: true, users: [...this.index].map(([username, access]) => ({ username, access })).sort((left, right) => left.username.localeCompare(right.username)) });
-          if (body.action === 'upsert' && body.access) {
-            if (body.username) this.index.set(body.username, body.access);
-            return Response.json({ ok: true });
-          }
-          if (body.action === 'remove') {
-            if (body.username) this.index.delete(body.username);
-            return Response.json({ ok: true });
-          }
-        }
-        if (body.action === 'create' && body.password && body.access) {
-          this.users.set(username, { password: body.password, access: body.access });
-          this.index.set(username, body.access);
-          return Response.json({ ok: true, access: body.access });
-        }
-        if (body.action === 'delete') {
-          this.users.set(username, { password: '', access: 'read', deleted: true });
-          this.index.delete(username);
-          return Response.json({ ok: true });
-        }
-        const user = this.users.get(username);
-        const ok = Boolean(user && !user.deleted && user.password === body.password);
-        if (ok && user) this.index.set(username, user.access);
-        return Response.json({ ok, access: user?.access });
+      create: async (_name: string, password: string, access: 'read' | 'write') => {
+        this.users.set(username, { password, access });
+        this.index.set(username, access);
       },
+      delete: async () => {
+        this.users.set(username, { password: '', access: 'read', deleted: true });
+        this.index.delete(username);
+      },
+      authenticate: async (_name: string, password: string) => {
+        const user = this.users.get(username);
+        const ok = Boolean(user && !user.deleted && user.password === password);
+        if (ok && user) this.index.set(username, user.access);
+        return { ok, access: user?.access };
+      },
+      upsertIndexedUser: async (name: string, access: 'read' | 'write') => { this.index.set(name, access); },
+      removeIndexedUser: async (name: string) => { this.index.delete(name); },
+      listIndexedUsers: async () => [...this.index].map(([name, access]) => ({ username: name, access })).sort((left, right) => left.username.localeCompare(right.username)),
     }),
-  } as DurableObjectNamespace;
+  } as never;
 }
 
 type TestEnv = Env & {
@@ -176,6 +171,18 @@ describe('worker', () => {
     expect(body).toEqual({ message: 'configuration error' });
   });
 
+  test('rejects malformed usernames, overlong passwords, and unsafe sizes as client errors', async () => {
+    const e = env();
+    const malformed = await worker.fetch(new Request('https://example.com/admin/users/%E0%A4%A', { method: 'DELETE', headers: authHeaders() }), e, {} as ExecutionContext);
+    const overlong = await worker.fetch(new Request('https://example.com/admin/users/alice', {
+      method: 'PUT', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ password: 'x'.repeat(1025), access: 'read' }),
+    }), e, {} as ExecutionContext);
+    const unsafe = await worker.fetch(new Request('https://example.com/objects/batch', {
+      method: 'POST', headers: authHeaders({ 'Content-Type': 'application/vnd.git-lfs+json' }), body: JSON.stringify({ operation: 'upload', objects: [{ oid, size: Number.MAX_VALUE }] }),
+    }), e, {} as ExecutionContext);
+    expect([malformed.status, overlong.status, unsafe.status]).toEqual([400, 400, 400]);
+  });
+
   test('batch upload returns upload action', async () => {
     const e = env();
     const req = new Request('https://example.com/objects/batch', {
@@ -189,7 +196,7 @@ describe('worker', () => {
 
     expect(res.status).toBe(200);
     expect(body.transfer).toBe('basic');
-    expect(body.objects[0].actions.upload.href).toBe('https://example.com/objects/' + oid);
+    expect(body.objects[0]!.actions.upload.href).toBe('https://example.com/objects/' + oid);
   });
 
   test('direct batch upload uses Worker proxy action and repairs unverified objects', async () => {
@@ -205,7 +212,7 @@ describe('worker', () => {
     const body = await res.json() as { objects: Array<{ actions: { upload: { href: string } } }> };
 
     expect(res.status).toBe(200);
-    expect(body.objects[0].actions.upload.href).toBe('https://example.com/objects/' + oid);
+    expect(body.objects[0]!.actions.upload.href).toBe('https://example.com/objects/' + oid);
   });
 
   test('batch object existence uses R2, not KV', async () => {
@@ -237,8 +244,8 @@ describe('worker', () => {
     const body = await res.json() as { objects: Array<{ error: { code: number }; actions?: { upload?: unknown } }> };
 
     expect(res.status).toBe(200);
-    expect(body.objects[0].error.code).toBe(409);
-    expect(body.objects[0].actions?.upload).toBeUndefined();
+    expect(body.objects[0]!.error.code).toBe(409);
+    expect(body.objects[0]!.actions?.upload).toBeUndefined();
   });
 
   test('batch download signs only Worker-verified R2 objects', async () => {
@@ -254,7 +261,7 @@ describe('worker', () => {
     const body = await res.json() as { objects: Array<{ actions: { download: { href: string } } }> };
 
     expect(res.status).toBe(200);
-    expect(body.objects[0].actions.download.href).toBe('https://example.com/objects/' + oid);
+    expect(body.objects[0]!.actions.download.href).toBe('https://example.com/objects/' + oid);
 
     const direct = directEnv();
     await direct.GITME_R2.put('objects/' + oid, 'x');
@@ -266,7 +273,7 @@ describe('worker', () => {
     const legacyRes = await worker.fetch(legacyReq, direct, {} as ExecutionContext);
     const legacyBody = await legacyRes.json() as { objects: Array<{ actions: { download: { href: string } } }> };
 
-    expect(legacyBody.objects[0].actions.download.href).toBe('https://example.com/objects/' + oid);
+    expect(legacyBody.objects[0]!.actions.download.href).toBe('https://example.com/objects/' + oid);
 
     const content = 'direct download';
     const verifiedOid = await sha256Hex(content);
@@ -279,11 +286,11 @@ describe('worker', () => {
     });
     const directRes = await worker.fetch(directReq, direct, {} as ExecutionContext);
     const directBody = await directRes.json() as { objects: Array<{ actions: { download: { href: string; expires_in: number } } }> };
-    const url = new URL(directBody.objects[0].actions.download.href);
+    const url = new URL(directBody.objects[0]!.actions.download.href);
 
     expect(url.host).toBe('test-account.r2.cloudflarestorage.com');
     expect(url.searchParams.get('X-Amz-Algorithm')).toBe('AWS4-HMAC-SHA256');
-    expect(directBody.objects[0].actions.download.expires_in).toBe(900);
+    expect(directBody.objects[0]!.actions.download.expires_in).toBe(900);
   });
 
   test('direct mode missing signing config returns configuration error', async () => {
@@ -344,7 +351,7 @@ describe('worker', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('Content-Type')).toBe('application/octet-stream');
     expect(res.headers.get('Content-Length')).toBe('11');
-    expect(await res.text()).toBe(content);
+    expect(new TextDecoder().decode(await res.arrayBuffer())).toBe(content);
   });
 
   test('auth is required', async () => {
@@ -356,8 +363,15 @@ describe('worker', () => {
 
     expect(res.status).toBe(401);
     expect(res.headers.get('Content-Type')).toBe('application/vnd.git-lfs+json');
-    expect(res.headers.get('WWW-Authenticate')).toBe('Basic realm="git-me"');
+    expect(res.headers.get('WWW-Authenticate')).toBe('Basic realm="git-me", charset="UTF-8"');
     expect(body.message).toBe('authentication required');
+  });
+
+  test('rejects bearer tokens with different content and length', async () => {
+    const e = env();
+    const short = await worker.fetch(new Request('https://example.com/admin/users', { headers: { Authorization: 'Bearer t' } }), e, {} as ExecutionContext);
+    const long = await worker.fetch(new Request('https://example.com/admin/users', { headers: { Authorization: `Bearer ${'x'.repeat(200)}` } }), e, {} as ExecutionContext);
+    expect([short.status, long.status]).toEqual([401, 401]);
   });
 
   test('admin creates user and basic auth can upload', async () => {
@@ -438,6 +452,7 @@ describe('worker', () => {
 
     expect(res.status).toBe(400);
     expect(await e.GITME_R2.get('objects/' + oid)).toBeNull();
+    expect([...e.GITME_R2.objects.keys()].filter((key) => key.includes('/.tmp/'))).toEqual([]);
   });
 
   test('hash mismatch preserves existing object', async () => {
@@ -456,7 +471,39 @@ describe('worker', () => {
 
     expect(res.status).toBe(400);
     expect(object).toBeTruthy();
-    expect(await new Response(object?.body).text()).toBe(content);
+    expect(new TextDecoder().decode(await new Response(object?.body).arrayBuffer())).toBe(content);
+  });
+
+  test('settles temporary storage failures and removes temporary objects', async () => {
+    const e = env();
+    e.GITME_R2.failPut = (key) => key.includes('/.tmp/');
+    const content = 'temporary failure';
+    const realOID = await sha256Hex(content);
+    const res = await worker.fetch(new Request(`https://example.com/objects/${realOID}`, { method: 'PUT', headers: authHeaders(), body: content }), e, {} as ExecutionContext);
+    expect(res.status).toBe(500);
+    expect([...e.GITME_R2.objects.keys()].filter((key) => key.includes('/.tmp/'))).toEqual([]);
+    expect(e.GITME_R2.deleteCalls.some((key) => key.includes('/.tmp/'))).toBe(true);
+  });
+
+  test('removes the temporary object when final promotion fails', async () => {
+    const e = env();
+    const content = 'promotion failure';
+    const realOID = await sha256Hex(content);
+    e.GITME_R2.failPut = (key) => key === `objects/${realOID}`;
+    const res = await worker.fetch(new Request(`https://example.com/objects/${realOID}`, { method: 'PUT', headers: authHeaders(), body: content }), e, {} as ExecutionContext);
+    expect(res.status).toBe(500);
+    expect([...e.GITME_R2.objects.keys()].filter((key) => key.includes('/.tmp/'))).toEqual([]);
+  });
+
+  test('reports cleanup failure after preserving the verified final object', async () => {
+    const e = env();
+    const content = 'cleanup failure';
+    const realOID = await sha256Hex(content);
+    e.GITME_R2.failDelete = true;
+    const res = await worker.fetch(new Request(`https://example.com/objects/${realOID}`, { method: 'PUT', headers: authHeaders(), body: content }), e, {} as ExecutionContext);
+    expect(res.status).toBe(500);
+    expect(await e.GITME_R2.get(`objects/${realOID}`)).toBeTruthy();
+    expect(e.GITME_R2.deleteCalls.some((key) => key.includes('/.tmp/'))).toBe(true);
   });
 
   test('batch download returns object error when R2 object missing', async () => {
@@ -471,8 +518,8 @@ describe('worker', () => {
     const body = await res.json() as { objects: Array<{ error: { code: number }; actions?: unknown }> };
 
     expect(res.status).toBe(200);
-    expect(body.objects[0].error.code).toBe(404);
-    expect(body.objects[0].actions).toBeUndefined();
+    expect(body.objects[0]!.error.code).toBe(404);
+    expect(body.objects[0]!.actions).toBeUndefined();
   });
 });
 
@@ -502,5 +549,10 @@ describe('presignR2Url', () => {
     const input = { method: 'GET' as const, key: 'objects/' + oid, expiresSeconds: 600, signing, now: new Date('2026-01-02T03:04:05.000Z') };
 
     await expect(presignR2Url(input)).resolves.toBe(await presignR2Url(input));
+  });
+
+  test('matches the fixed SigV4 golden signature', async () => {
+    const url = new URL(await presignR2Url({ method: 'GET', key: 'objects/' + oid, expiresSeconds: 900, signing, now: new Date('2026-01-02T03:04:05.000Z') }));
+    expect(url.searchParams.get('X-Amz-Signature')).toBe('540daea892d3e4b481622d340038f946a2e11faba35e97c6986029ced2df1f77');
   });
 });

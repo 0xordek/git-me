@@ -2,6 +2,7 @@ import { ConfigError, healthResponse, loadConfig } from './config';
 import type { AppConfig } from './config';
 import { presignR2Url } from './signing';
 import { authenticateUser, createUser, deleteUser, listUsers, type UserAccess } from './auth';
+import { createDigestStream, timingSafeEqual } from './crypto';
 
 export { AuthUser } from './auth-do';
 
@@ -10,7 +11,7 @@ const OBJECT_PREFIX = 'objects/';
 const OID_RE = /^[0-9a-fA-F]{64}$/;
 const USERNAME_RE = /^[a-z0-9][a-z0-9_.-]{0,62}$/;
 
-export interface Env {
+export interface Env extends CloudflareBindings {
   GITME_AUTH_TOKEN?: string;
   GITME_TRANSFER_MODE?: string;
   GITME_SIGNED_URL_TTL_SECONDS?: string;
@@ -18,9 +19,6 @@ export interface Env {
   GITME_R2_ACCESS_KEY_ID?: string;
   GITME_R2_SECRET_ACCESS_KEY?: string;
   GITME_R2_BUCKET_NAME?: string;
-  GITME_R2: R2Bucket;
-  GITME_KV: KVNamespace;
-  GITME_AUTH: DurableObjectNamespace;
 }
 
 type LfsOperation = 'upload' | 'download';
@@ -59,34 +57,35 @@ export default {
         if (error instanceof ConfigError) return lfsError(500, 'configuration error');
         throw error;
       }
-      if (url.pathname === '/admin/users') return handleAdminUsers(request, env, config);
-      if (url.pathname.startsWith('/admin/users/')) return handleAdminUser(request, env, config, url.pathname.slice('/admin/users/'.length));
+      if (url.pathname === '/admin/users') return await handleAdminUsers(request, env, config);
+      if (url.pathname.startsWith('/admin/users/')) return await handleAdminUser(request, env, config, url.pathname.slice('/admin/users/'.length));
 
       if (url.pathname === '/objects/batch') {
-        return handleBatch(request, env, config);
+        return await handleBatch(request, env, config);
       }
       if (url.pathname.startsWith('/objects/')) {
         const oid = url.pathname.slice('/objects/'.length);
         if (request.method === 'PUT') {
           const auth = await requireLfsAccess(request, env, config, 'write');
           if (auth) return auth;
-          return handleUpload(request, env, oid);
+          return await handleUpload(request, env, oid);
         }
         if (request.method === 'GET') {
           const auth = await requireLfsAccess(request, env, config, 'read');
           if (auth) return auth;
-          return handleDownload(env, oid);
+          return await handleDownload(env, oid);
         }
         return lfsError(405, 'method not allowed');
       }
       return new Response('not found\n', { status: 404 });
     } catch (error) {
-      console.error('git-me request failed', {
+      console.error(JSON.stringify({
+        message: 'git-me request failed',
         requestId,
         method: request.method,
         path,
         error: error instanceof Error ? error.message : String(error),
-      });
+      }));
       const response = lfsError(500, 'internal server error');
       response.headers.set('X-Request-Id', requestId);
       return response;
@@ -178,25 +177,40 @@ async function handleUpload(request: Request, env: Env, oid: string): Promise<Re
   const tempKey = OBJECT_PREFIX + '.tmp/' + crypto.randomUUID();
   const [storeStream, digestStream] = request.body.tee();
   const putPromise = env.GITME_R2.put(tempKey, storeStream);
-  const digest = await digestAndCount(digestStream);
-  await putPromise;
+  let operationFailed = false;
+  try {
+    const [stored, digested] = await Promise.allSettled([putPromise, digestAndCount(digestStream)]);
+    if (stored.status === 'rejected') throw stored.reason;
+    if (digested.status === 'rejected') throw digested.reason;
+    if (digested.value.hex.toLowerCase() !== oid.toLowerCase()) return lfsError(400, 'upload hash mismatch');
+    const declaredSize = request.headers.get('Content-Length');
+    if (declaredSize !== null && Number(declaredSize) !== digested.value.size) return lfsError(400, 'upload size mismatch');
 
-  if (digest.hex.toLowerCase() !== oid.toLowerCase()) {
-    await env.GITME_R2.delete(tempKey);
-    return lfsError(400, 'upload hash mismatch');
+    const tempObject = await env.GITME_R2.get(tempKey);
+    if (!tempObject?.body) throw new Error('temporary upload missing');
+    await env.GITME_R2.put(objectKey, tempObject.body, { customMetadata: { sha256: oid.toLowerCase() } });
+    return new Response(null, { status: 200 });
+  } catch (error) {
+    operationFailed = true;
+    throw error;
+  } finally {
+    try {
+      await env.GITME_R2.delete(tempKey);
+    } catch (error) {
+      console.error(JSON.stringify({ message: 'temporary upload cleanup failed', key: tempKey, error: error instanceof Error ? error.message : String(error) }));
+      if (!operationFailed) throw error;
+    }
   }
-
-  const tempObject = await env.GITME_R2.get(tempKey);
-  if (!tempObject?.body) return lfsError(500, 'internal server error');
-  await env.GITME_R2.put(objectKey, tempObject.body, { customMetadata: { sha256: oid.toLowerCase() } });
-  await env.GITME_R2.delete(tempKey);
-
-  return new Response(null, { status: 200 });
 }
 
 async function handleAdminUser(request: Request, env: Env, config: AppConfig, rawUsername: string): Promise<Response> {
-  if (request.headers.get('Authorization') !== `Bearer ${config.authToken}`) return appJson(401, { message: 'authentication required' });
-  const username = normalizeUsername(decodeURIComponent(rawUsername));
+  if (!await bearerMatches(request, config.authToken)) return appJson(401, { message: 'authentication required' });
+  let username = '';
+  try {
+    username = normalizeUsername(decodeURIComponent(rawUsername));
+  } catch {
+    return appJson(400, { message: 'invalid username' });
+  }
   if (!username) return appJson(400, { message: 'invalid username' });
 
   if (request.method === 'PUT') {
@@ -206,7 +220,7 @@ async function handleAdminUser(request: Request, env: Env, config: AppConfig, ra
     } catch {
       return appJson(400, { message: 'invalid JSON' });
     }
-    if (typeof body.password !== 'string' || body.password.length < 12) return appJson(400, { message: 'password must be at least 12 characters' });
+    if (typeof body.password !== 'string' || body.password.length < 12 || body.password.length > 1024) return appJson(400, { message: 'password must be between 12 and 1024 characters' });
     const access = body.access === 'read' || body.access === 'write' ? body.access : '';
     if (!access) return appJson(400, { message: 'access must be read or write' });
     await createUser(env, username, body.password, access);
@@ -222,7 +236,7 @@ async function handleAdminUser(request: Request, env: Env, config: AppConfig, ra
 }
 
 async function handleAdminUsers(request: Request, env: Env, config: AppConfig): Promise<Response> {
-  if (request.headers.get('Authorization') !== `Bearer ${config.authToken}`) return appJson(401, { message: 'authentication required' });
+  if (!await bearerMatches(request, config.authToken)) return appJson(401, { message: 'authentication required' });
   if (request.method !== 'GET') return appJson(405, { message: 'method not allowed' });
   return appJson(200, { users: await listUsers(env) });
 }
@@ -246,7 +260,7 @@ function isLfsOperation(operation: unknown): operation is LfsOperation {
 }
 
 function isLfsContentType(contentType: string | null): boolean {
-  return (contentType || '').split(';', 1)[0].trim().toLowerCase() === LFS_CONTENT_TYPE;
+  return ((contentType || '').split(';', 1)[0] ?? '').trim().toLowerCase() === LFS_CONTENT_TYPE;
 }
 
 function selectTransfer(transfers: unknown): string {
@@ -258,7 +272,7 @@ function selectTransfer(transfers: unknown): string {
 
 function validateObject(obj: unknown): string {
   if (!isObjectRecord(obj) || !OID_RE.test(String(obj.oid || ''))) return 'invalid oid';
-  if (!Number.isInteger(obj.size) || obj.size < 0) return 'object size must not be negative';
+  if (!Number.isSafeInteger(obj.size) || obj.size < 0) return 'object size must be a non-negative safe integer';
   return '';
 }
 
@@ -284,7 +298,7 @@ function lfsError(status: number, message: string): Response {
 
 function lfsAuthError(): Response {
   const res = lfsError(401, 'authentication required');
-  res.headers.set('WWW-Authenticate', 'Basic realm="git-me"');
+  res.headers.set('WWW-Authenticate', 'Basic realm="git-me", charset="UTF-8"');
   return res;
 }
 
@@ -300,7 +314,7 @@ async function requireLfsAccess(request: Request, env: Env, config: AppConfig, n
 
 async function authenticateLfs(request: Request, env: Env, config: AppConfig): Promise<{ access: UserAccess } | { response: Response }> {
   const auth = request.headers.get('Authorization') || '';
-  if (auth === `Bearer ${config.authToken}`) return { access: 'write' };
+  if (await secureTextEqual(auth, `Bearer ${config.authToken}`)) return { access: 'write' };
   if (!auth.startsWith('Basic ')) return { response: lfsAuthError() };
 
   const credentials = decodeBasicAuth(auth.slice('Basic '.length));
@@ -315,7 +329,8 @@ async function authenticateLfs(request: Request, env: Env, config: AppConfig): P
 
 function decodeBasicAuth(encoded: string): { username: string; password: string } | null {
   try {
-    const decoded = atob(encoded);
+    const bytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0));
+    const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     const separator = decoded.indexOf(':');
     if (separator < 1) return null;
     return { username: decoded.slice(0, separator), password: decoded.slice(separator + 1) };
@@ -339,23 +354,22 @@ function canAccess(actual: UserAccess, needed: UserAccess): boolean {
 }
 
 async function digestAndCount(stream: ReadableStream<Uint8Array>): Promise<DigestResult> {
-  if (typeof DigestStream === 'function') {
-    let size = 0;
-    const counter = new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) {
-        size += chunk.byteLength;
-        controller.enqueue(chunk);
-      },
-    });
-    const digester = new DigestStream('SHA-256');
-    await stream.pipeThrough(counter).pipeTo(digester);
-    const digest = await digester.digest;
-    return { hex: bytesToHex(new Uint8Array(digest)), size };
-  }
+  const digester = createDigestStream('SHA-256');
+  await stream.pipeTo(digester);
+  return { hex: bytesToHex(new Uint8Array(await digester.digest)), size: Number(digester.bytesWritten) };
+}
 
-  const buffer = await new Response(stream).arrayBuffer();
-  const digest = await crypto.subtle.digest('SHA-256', buffer);
-  return { hex: bytesToHex(new Uint8Array(digest)), size: buffer.byteLength };
+async function bearerMatches(request: Request, token: string): Promise<boolean> {
+  return await secureTextEqual(request.headers.get('Authorization') || '', `Bearer ${token}`);
+}
+
+async function secureTextEqual(left: string, right: string): Promise<boolean> {
+  const encoder = new TextEncoder();
+  const [leftHash, rightHash] = await Promise.all([
+    crypto.subtle.digest('SHA-256', encoder.encode(left)),
+    crypto.subtle.digest('SHA-256', encoder.encode(right)),
+  ]);
+  return timingSafeEqual(leftHash, rightHash);
 }
 
 function bytesToHex(bytes: Uint8Array): string {
