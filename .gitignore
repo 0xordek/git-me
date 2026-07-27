@@ -20,6 +20,9 @@ dist/worker.js
 # Coverage
 /coverage/
 
+# Agent working files
+/.scratch/
+
 # Local secrets
 .env
 .env.*
