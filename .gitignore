@@ -22,6 +22,9 @@ dist/worker.js
 
 # Agent working files
 /.scratch/
+/CLAUDE.md
+/AGENTS.md
+/docs/agents/
 
 # Local secrets
 .env
