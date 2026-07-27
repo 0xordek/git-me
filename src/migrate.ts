@@ -1,6 +1,12 @@
+import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { LfsClient, type HeaderMap, type LfsAction, type LfsBatchObject, type LfsObject } from './lfs-client';
-import { scanPointers } from './pointers';
-import type { LfsPointer } from './pointers';
+import { scanPointers, type LfsPointer } from './pointers';
+import { assertSafeUrl } from './url';
 
 export type MigrateOptions = {
   repoPath: string;
@@ -36,30 +42,6 @@ export type MigrateDeps = {
   setGitConfig?: (repoPath: string, key: string, value: string) => Promise<void>;
 };
 
-const nodeImport = <T>(specifier: string): Promise<T> => import(/* @vite-ignore */ specifier) as Promise<T>;
-
-type FsPromises = {
-  rm(path: string, options: { force: boolean }): Promise<void>;
-};
-type FsModule = { createReadStream(path: string): ReadStreamLike };
-type Hash = { update(data: Uint8Array): void; digest(encoding: 'hex'): string };
-type CryptoModule = { createHash(algorithm: 'sha256'): Hash };
-type ReadStreamLike = {
-  on(event: 'data', listener: (chunk: Uint8Array) => void): ReadStreamLike;
-  on(event: 'error', listener: (error: Error) => void): ReadStreamLike;
-  on(event: 'end', listener: () => void): ReadStreamLike;
-};
-type Os = { tmpdir(): string };
-type Path = { join(...parts: string[]): string };
-type ChildProcess = {
-  execFile(
-    file: string,
-    args: readonly string[],
-    options: { encoding: 'utf8' },
-    callback: (error: Error | null, stdout: string, stderr: string) => void,
-  ): void;
-};
-
 export async function migrate(options: MigrateOptions, deps: MigrateDeps = {}): Promise<MigrationResult> {
   const scan = deps.scanPointers ?? scanPointers;
   const createClient = deps.createClient ?? ((clientOptions) => new LfsClient(clientOptions));
@@ -68,23 +50,25 @@ export async function migrate(options: MigrateOptions, deps: MigrateDeps = {}): 
   const getGitConfig = deps.getGitConfig ?? getGitConfigValue;
   const setGitConfig = deps.setGitConfig ?? setGitConfigValue;
 
+  assertSafeUrl(options.targetUrl, true);
   const pointers = await scan(options.repoPath);
-  const uniqueObjects = uniqueLfsObjects(pointers);
+  const { objects, conflicts } = classifyPointers(pointers);
+  const unique = objects.length + conflicts.length;
   const result: MigrationResult = {
     scanned: pointers.length,
-    unique: uniqueObjects.length,
+    unique,
     migrated: 0,
-    skipped: pointers.length - uniqueObjects.length,
-    failed: [],
+    skipped: pointers.length - unique,
+    failed: conflicts,
   };
-
   if (options.dryRun) return result;
 
-  const sourceUrl = options.sourceUrl ?? await getGitConfig(options.repoPath, 'lfs.url');
-  const source = createClient({ baseUrl: sourceUrl.trim(), headers: options.sourceHeaders });
+  const sourceUrl = (options.sourceUrl ?? await getGitConfig(options.repoPath, 'lfs.url')).trim();
+  assertSafeUrl(sourceUrl, Object.keys(options.sourceHeaders).length > 0);
+  const source = createClient({ baseUrl: sourceUrl, headers: options.sourceHeaders });
   const target = createClient({ baseUrl: options.targetUrl, headers: { Authorization: `Bearer ${options.targetToken}` } });
 
-  await runPool(uniqueObjects, options.concurrency, async (object) => {
+  await runPool(objects, options.concurrency, async (object) => {
     const tempPath = await createTempPath();
     try {
       const download = await batchAction(source, 'download', object, 'download');
@@ -99,8 +83,7 @@ export async function migrate(options: MigrateOptions, deps: MigrateDeps = {}): 
       }
 
       await target.uploadFromFile(upload.href, tempPath, upload.header);
-      const targetDownload = await batchAction(target, 'download', object, 'download');
-      if (!targetDownload) throw new Error('target download action missing');
+      if (!await batchAction(target, 'download', object, 'download')) throw new Error('target download action missing');
       result.migrated += 1;
     } catch (error) {
       result.failed.push({ oid: object.oid, reason: errorMessage(error) });
@@ -109,30 +92,25 @@ export async function migrate(options: MigrateOptions, deps: MigrateDeps = {}): 
     }
   });
 
-  if (options.writeConfig && result.failed.length === 0) {
-    await setGitConfig(options.repoPath, 'lfs.url', options.targetUrl);
-  }
-
+  if (options.writeConfig && result.failed.length === 0) await setGitConfig(options.repoPath, 'lfs.url', options.targetUrl);
   return result;
 }
 
-function uniqueLfsObjects(pointers: LfsPointer[]): LfsObject[] {
-  const seen = new Set<string>();
-  const objects: LfsObject[] = [];
+function classifyPointers(pointers: LfsPointer[]): { objects: LfsObject[]; conflicts: MigrationResult['failed'] } {
+  const sizes = new Map<string, number>();
+  const conflicts = new Map<string, Set<number>>();
   for (const pointer of pointers) {
-    if (seen.has(pointer.oid)) continue;
-    seen.add(pointer.oid);
-    objects.push({ oid: pointer.oid, size: pointer.size });
+    const size = sizes.get(pointer.oid);
+    if (size === undefined) sizes.set(pointer.oid, pointer.size);
+    else if (size !== pointer.size) conflicts.set(pointer.oid, new Set([size, pointer.size, ...(conflicts.get(pointer.oid) ?? [])]));
   }
-  return objects;
+  return {
+    objects: [...sizes].filter(([oid]) => !conflicts.has(oid)).map(([oid, size]) => ({ oid, size })),
+    conflicts: [...conflicts].map(([oid, values]) => ({ oid, reason: `conflicting pointer sizes: ${[...values].sort((a, b) => a - b).join(', ')}` })),
+  };
 }
 
-async function batchAction(
-  client: LfsClientLike,
-  operation: 'upload' | 'download',
-  object: LfsObject,
-  action: 'upload' | 'download',
-): Promise<LfsAction | null> {
+async function batchAction(client: LfsClientLike, operation: 'upload' | 'download', object: LfsObject, action: 'upload' | 'download'): Promise<LfsAction | null> {
   const response = await client.batch(operation, [object]);
   const responseObject = response.objects.find((item) => item.oid === object.oid);
   if (!responseObject) throw new Error(`${operation} batch missing object`);
@@ -146,17 +124,15 @@ async function runPool<T>(items: T[], concurrency: number, worker: (item: T) => 
     while (index < items.length) {
       const item = items[index];
       index += 1;
-      await worker(item);
+      if (item !== undefined) await worker(item);
     }
   });
   await Promise.all(workers);
 }
 
 async function sha256File(path: string): Promise<string> {
-  const [fs, cryptoModule] = await Promise.all([nodeImport<FsModule>('node:fs'), nodeImport<CryptoModule>('node:crypto')]);
-  const hash = cryptoModule.createHash('sha256');
-  const stream = fs.createReadStream(path);
-
+  const hash = createHash('sha256');
+  const stream = createReadStream(path);
   return await new Promise((resolve, reject) => {
     stream.on('data', (chunk) => hash.update(chunk));
     stream.on('error', reject);
@@ -165,13 +141,11 @@ async function sha256File(path: string): Promise<string> {
 }
 
 async function defaultCreateTempPath(): Promise<string> {
-  const [os, path] = await Promise.all([nodeImport<Os>('node:os'), nodeImport<Path>('node:path')]);
-  return path.join(os.tmpdir(), `git-me-migrate-${crypto.randomUUID()}`);
+  return join(await mkdtemp(join(tmpdir(), 'git-me-migrate-')), 'object');
 }
 
 async function defaultRemoveFile(path: string): Promise<void> {
-  const fs = await nodeImport<FsPromises>('node:fs/promises');
-  await fs.rm(path, { force: true });
+  await rm(dirname(path), { recursive: true, force: true });
 }
 
 async function getGitConfigValue(repoPath: string, key: string): Promise<string> {
@@ -183,14 +157,10 @@ async function setGitConfigValue(repoPath: string, key: string, value: string): 
 }
 
 async function execGit(repoPath: string, args: readonly string[]): Promise<string> {
-  const childProcess = await nodeImport<ChildProcess>('node:child_process');
   return await new Promise((resolve, reject) => {
-    childProcess.execFile('git', ['-C', repoPath, ...args], { encoding: 'utf8' }, (error, stdout, stderr) => {
-      if (error) {
-        reject(new Error(`${error.message}\n${stderr}`));
-        return;
-      }
-      resolve(stdout);
+    execFile('git', ['-C', repoPath, ...args], { encoding: 'utf8' }, (error, stdout, stderr) => {
+      if (error) reject(new Error(`${error.message}\n${stderr}`));
+      else resolve(stdout);
     });
   });
 }

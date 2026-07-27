@@ -39,7 +39,7 @@ export type DeployDeps = {
   now?: () => string;
 };
 
-const COMPATIBILITY_DATE = '2026-07-07';
+const COMPATIBILITY_DATE = '2026-07-12';
 const require = createRequire(import.meta.url);
 
 export async function deployWorker(options: DeployOptions, deps: DeployDeps = {}): Promise<DeployResult> {
@@ -168,6 +168,17 @@ function initialConfig(workerName: string, workerBundle: string, accountId?: str
     'tag = "v1"',
     'new_sqlite_classes = ["AuthUser"]',
     '',
+    '[observability]',
+    'enabled = true',
+    '',
+    '[observability.logs]',
+    'enabled = true',
+    'head_sampling_rate = 1',
+    '',
+    '[observability.traces]',
+    'enabled = true',
+    'head_sampling_rate = 0.01',
+    '',
   ].join('\n');
 }
 
@@ -189,9 +200,8 @@ function kvNamespaceIdFromOutput(output: string): string | undefined {
 
 function endpointFromOutput(output: string): string | undefined {
   const field = output.match(/"(?:url|workers_dev_url)"\s*:\s*"(https:\/\/[^"\\]+)"/i)?.[1];
-  const match = field ? [field] : output.match(/https:\/\/[a-z0-9][a-z0-9.-]*\.workers\.dev(?:\/[^\s]*)?/i);
-  if (!match) return undefined;
-  return match[1] ? match[1].replace(/[),.]+$/, '') : match[0].replace(/[),.]+$/, '');
+  const endpoint = field ?? output.match(/https:\/\/[a-z0-9][a-z0-9.-]*\.workers\.dev(?:\/[^\s]*)?/i)?.[0];
+  return endpoint?.replace(/[),.]+$/, '');
 }
 
 function accountIdFromOutput(output: string): string | undefined {

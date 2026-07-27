@@ -246,6 +246,14 @@ describe('runCli', () => {
     expect(testIO.err.join('')).toContain('missing admin credential');
   });
 
+  test('rejects secret-bearing HTTP targets except on loopback', async () => {
+    const insecure = io();
+    const loopback = io();
+    await expect(runCli(['user', 'list', '--target', 'http://example.com', '--token-env', 'ADMIN_TOKEN'], insecure)).resolves.toBe(2);
+    await expect(runCli(['user', 'list', '--target', 'http://127.0.0.1:8787', '--token-env', 'ADMIN_TOKEN'], loopback)).resolves.toBe(0);
+    expect(insecure.err.join('')).toContain('must use HTTPS');
+  });
+
   test('deploys a worker and prints the saved profile endpoint', async () => {
     const testIO = io({
       workerDeploy: vi.fn(async (options) => ({ profile: options.profile, endpoint: 'https://worker.example', workerName: options.workerName || 'generated', bucketName: 'bucket' })),

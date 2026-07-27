@@ -45,6 +45,19 @@ If the operating system credential store is unavailable, pass the admin secret e
 
 Existing users created before user listing are added to the list after their next successful login; Durable Objects cannot enumerate them safely.
 
+### macOS credential recovery for 0.4.0–0.4.1
+
+Those releases could deploy successfully without saving the generated admin secret in Keychain. If the profile cannot find its credential, rotate `GITME_AUTH_TOKEN` in the Cloudflare dashboard (or with `wrangler secret put` and a local config), then save the same replacement locally without putting it in a process argument:
+
+```bash
+read -rsp 'New admin token: ' GITME_AUTH_TOKEN; echo
+printf '%s' "$GITME_AUTH_TOKEN" | security add-generic-password \
+  -U -a git-me -s git-me:default:admin -w
+unset GITME_AUTH_TOKEN
+```
+
+Replace `default` in the Keychain service name for another profile. Environment and stdin token options remain available if Keychain cannot be used.
+
 ## Quick Start (development)
 
 ```bash
@@ -219,6 +232,8 @@ npx @0xordek/git-me migrate \
 unset GITME_TARGET_TOKEN GITME_SOURCE_AUTH
 ```
 
+Secret-bearing targets, sources, and action URLs must use HTTPS. Plain HTTP is accepted only for loopback development (`localhost`, `127.0.0.1`, or `::1`), and embedded URL credentials are rejected.
+
 After a successful real migration, add `--write-config` to update the repository's `lfs.url` to the target:
 
 ```bash
@@ -252,7 +267,7 @@ Batch requests and error responses use `application/vnd.git-lfs+json`.
 
 - R2 object key: `objects/<oid>`
 - Temporary proxy-upload key prefix: `objects/.tmp/`
-- Durable Object: one `AuthUser` instance per normalized username, plus reserved `admin:users` instance for the serialized admin index
+- Durable Object: one `AuthUser` instance per normalized username, plus reserved `admin:users` instance for the transactional admin index
 - KV user key: `user:<username>` only during legacy SHA-256 credential upgrade
 
 ## Development
@@ -274,6 +289,8 @@ Existing deployments upgraded from a release that signed direct uploads must fir
 New passwords use salted PBKDF2-SHA-256 records in Durable Objects. Existing KV SHA-256 records upgrade after one successful login. Deleted users leave a Durable Object tombstone, so stale KV reads cannot restore access. Authentication locks one client source for one username for one minute after five failed attempts in one minute.
 
 `GET /health` checks configuration only. It does not prove R2, KV, or Durable Object availability. Failed requests emit a request ID in `X-Request-Id`; logs never include credentials or request bodies.
+
+Bearer credentials are compared in constant time after fixed-length hashing. Basic credentials are decoded as UTF-8. Proxy uploads stream into temporary R2 objects, settle both storage and digest work, and attempt temporary cleanup on every outcome.
 
 Report vulnerabilities through GitHub Security Advisories. See `SECURITY.md`.
 

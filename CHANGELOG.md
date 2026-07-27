@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.5.0 - 2026-07-12
+
+- Fixed macOS Keychain writes so generated admin secrets are supplied through stdin with the required `-w` prompt option.
+- Made proxy uploads settle storage and digest streams, clean temporary objects on every path, and route asynchronous failures through the Worker error boundary.
+- Added constant-time bearer checks, UTF-8 Basic authentication, bounded password/object validation, and malformed-path handling.
+- Switched `AuthUser` communication from JSON-over-fetch to typed Durable Object RPC while preserving existing records, tombstones, and migration state.
+- Added generated binding types, Workers-runtime integration tests, observability defaults, stricter indexed-access checks, and compatible Cloudflare/Vitest upgrades.
+- Secured migration temp files and secret-bearing URLs, detected conflicting pointer sizes, and added a fixed SigV4 signing vector.
+- Simplified CLI-only Node imports and removed the unused profile `current` field without invalidating existing profile files.
+
 ## 0.4.1 - 2026-07-11
 
 - Fixed npm-installed CLI commands silently exiting when launched through symlinked bin paths.

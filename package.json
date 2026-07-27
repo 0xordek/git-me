@@ -1,6 +1,6 @@
 {
   "name": "@0xordek/git-me",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Self-hosted Git LFS utility for Cloudflare Workers, R2, and Durable Objects.",
   "license": "MIT",
   "repository": {
@@ -26,26 +26,30 @@
     "dist/worker.js"
   ],
   "dependencies": {
-    "wrangler": "^4.107.1"
+    "wrangler": "^4.110.0"
   },
   "scripts": {
     "build": "npm run build:worker",
-    "test": "vitest run",
+    "test": "npm run test:node && npm run test:workers",
+    "test:node": "vitest run --config vitest.config.ts",
+    "test:workers": "vitest run --config vitest.worker.config.ts",
     "typecheck": "tsc --noEmit",
+    "types:check": "wrangler types worker-configuration.d.ts --config wrangler.example.toml --env-interface CloudflareBindings --include-runtime=false --check",
     "build:cli": "esbuild src/cli.ts --bundle --platform=node --format=esm --outfile=dist/cli.js --banner:js=\"#!/usr/bin/env node\"",
     "prepack": "npm run build:worker && npm run build:cli",
-    "check": "npm run build:worker && npm run build:cli && npm test && npm run typecheck && git diff --exit-code -- dist/cli.js && npm pack --dry-run --json | node -e \"let data='';process.stdin.on('data',chunk=>data+=chunk).on('end',()=>{const files=new Set(JSON.parse(data)[0].files.map(file=>file.path));if(!['dist/cli.js','dist/worker.js'].every(file=>files.has(file)))process.exit(1)})\" && npm run deploy:dry",
-    "build:worker": "esbuild src/worker.ts --bundle --format=esm --platform=browser --outfile=dist/worker.js",
+    "check": "npm run build:worker && npm run build:cli && npm test && npm run typecheck && npm run types:check && git diff --exit-code -- dist/cli.js && npm pack --dry-run --json | node -e \"let data='';process.stdin.on('data',chunk=>data+=chunk).on('end',()=>{const files=new Set(JSON.parse(data)[0].files.map(file=>file.path));if(!['dist/cli.js','dist/worker.js'].every(file=>files.has(file)))process.exit(1)})\" && npm run deploy:dry",
+    "build:worker": "esbuild src/worker.ts --bundle --format=esm --platform=browser --external:cloudflare:* --outfile=dist/worker.js",
     "deploy:dry": "wrangler deploy --dry-run --config wrangler.example.toml",
     "deploy": "wrangler deploy --config wrangler.local.toml",
     "version:upload": "wrangler versions upload --config wrangler.local.toml",
     "version:deploy": "wrangler versions deploy --config wrangler.local.toml"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260702.1",
-    "@types/node": "^26.1.0",
+    "@cloudflare/vitest-pool-workers": "^0.18.4",
+    "@cloudflare/workers-types": "^5.20260712.1",
+    "@types/node": "^26.1.1",
     "esbuild": "^0.28.1",
     "typescript": "^6.0.3",
-    "vitest": "^3.2.7"
+    "vitest": "^4.1.10"
   }
 }

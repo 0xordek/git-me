@@ -13,20 +13,26 @@ function createCredentialStore() {
 }
 var SystemCredentialStore = class {
   async get(key) {
-    if (platform() === "darwin") return await macGet(key);
-    if (platform() === "linux") return await linuxGet(key);
-    return await windowsGet(key);
+    const os = platform();
+    if (os === "darwin") return await macGet(key);
+    if (os === "linux") return await linuxGet(key);
+    if (os === "win32") return await windowsGet(key);
+    throw new Error(`credential store unsupported on ${os}`);
   }
   async set(key, value) {
     if (!value) throw new Error("credential cannot be empty");
-    if (platform() === "darwin") return await macSet(key, value);
-    if (platform() === "linux") return await linuxSet(key, value);
-    return await windowsSet(key, value);
+    const os = platform();
+    if (os === "darwin") return await macSet(key, value);
+    if (os === "linux") return await linuxSet(key, value);
+    if (os === "win32") return await windowsSet(key, value);
+    throw new Error(`credential store unsupported on ${os}`);
   }
   async delete(key) {
-    if (platform() === "darwin") return await macDelete(key);
-    if (platform() === "linux") return await linuxDelete(key);
-    return await windowsDelete(key);
+    const os = platform();
+    if (os === "darwin") return await macDelete(key);
+    if (os === "linux") return await linuxDelete(key);
+    if (os === "win32") return await windowsDelete(key);
+    throw new Error(`credential store unsupported on ${os}`);
   }
 };
 async function macGet(key) {
@@ -34,7 +40,7 @@ async function macGet(key) {
   return result?.trim() || null;
 }
 async function macSet(key, value) {
-  await run("security", ["add-generic-password", "-U", "-a", SERVICE, "-s", key], value);
+  await run("security", ["add-generic-password", "-U", "-a", SERVICE, "-s", key, "-w"], value);
 }
 async function macDelete(key) {
   await run("security", ["delete-generic-password", "-a", SERVICE, "-s", key], void 0, true);
@@ -155,7 +161,6 @@ var FileProfileStore = class {
   async save(profile) {
     const file = await readProfileFile(this.filePath);
     file.profiles[profile.name] = profile;
-    file.current = profile.name;
     await mkdir(dirname(this.filePath), { recursive: true, mode: 448 });
     const temporaryPath = `${this.filePath}.tmp`;
     await writeFile(temporaryPath, `${JSON.stringify(file, null, 2)}
@@ -170,11 +175,10 @@ async function readProfileFile(filePath) {
     if (parsed.version !== 1 || !parsed.profiles || typeof parsed.profiles !== "object") throw new Error(`invalid profile file: ${filePath}`);
     return {
       version: 1,
-      current: typeof parsed.current === "string" ? parsed.current : "default",
       profiles: parsed.profiles
     };
   } catch (error) {
-    if (error.code === "ENOENT") return { version: 1, current: "default", profiles: {} };
+    if (error.code === "ENOENT") return { version: 1, profiles: {} };
     if (error instanceof SyntaxError) throw new Error(`invalid profile file: ${filePath}`);
     throw error;
   }
@@ -187,7 +191,7 @@ function profileFilePath(env) {
 }
 
 // src/deploy.ts
-var COMPATIBILITY_DATE = "2026-07-07";
+var COMPATIBILITY_DATE = "2026-07-12";
 var require2 = createRequire(import.meta.url);
 async function deployWorker(options, deps = {}) {
   const runCommand = deps.runCommand ?? runWrangler;
@@ -309,6 +313,17 @@ function initialConfig(workerName, workerBundle, accountId) {
     "[[migrations]]",
     'tag = "v1"',
     'new_sqlite_classes = ["AuthUser"]',
+    "",
+    "[observability]",
+    "enabled = true",
+    "",
+    "[observability.logs]",
+    "enabled = true",
+    "head_sampling_rate = 1",
+    "",
+    "[observability.traces]",
+    "enabled = true",
+    "head_sampling_rate = 0.01",
     ""
   ].join("\n");
 }
@@ -334,9 +349,8 @@ function kvNamespaceIdFromOutput(output) {
 }
 function endpointFromOutput(output) {
   const field = output.match(/"(?:url|workers_dev_url)"\s*:\s*"(https:\/\/[^"\\]+)"/i)?.[1];
-  const match = field ? [field] : output.match(/https:\/\/[a-z0-9][a-z0-9.-]*\.workers\.dev(?:\/[^\s]*)?/i);
-  if (!match) return void 0;
-  return match[1] ? match[1].replace(/[),.]+$/, "") : match[0].replace(/[),.]+$/, "");
+  const endpoint = field ?? output.match(/https:\/\/[a-z0-9][a-z0-9.-]*\.workers\.dev(?:\/[^\s]*)?/i)?.[0];
+  return endpoint?.replace(/[),.]+$/, "");
 }
 function accountIdFromOutput(output) {
   return output.match(/\b[0-9a-f]{32}\b/i)?.[0];
@@ -387,13 +401,38 @@ async function spawnCommand(command, args, options = {}) {
   });
 }
 
+// src/migrate.ts
+import { execFile as execFile3 } from "node:child_process";
+import { createHash } from "node:crypto";
+import { createReadStream as createReadStream2 } from "node:fs";
+import { mkdtemp as mkdtemp2, rm as rm2 } from "node:fs/promises";
+import { tmpdir as tmpdir2 } from "node:os";
+import { dirname as dirname3, join as join4 } from "node:path";
+
+// src/lfs-client.ts
+import { createReadStream, createWriteStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+
+// src/url.ts
+var LOOPBACK_HOSTS = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "[::1]"]);
+function assertSafeUrl(value, secretBearing) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("invalid URL");
+  }
+  if (url.username || url.password) throw new Error("URL must not contain embedded credentials");
+  if (secretBearing && url.protocol !== "https:" && !(url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname))) {
+    throw new Error("secret-bearing URLs must use HTTPS (HTTP is allowed only for loopback)");
+  }
+}
+
 // src/lfs-client.ts
 var LFS_JSON = "application/vnd.git-lfs+json";
 var ERROR_SNIPPET_BYTES = 200;
-var nodeImport = (specifier) => import(
-  /* @vite-ignore */
-  specifier
-);
 function mergeActionHeaders(base, actionHeaders) {
   return { ...base, ...actionHeaders ?? {} };
 }
@@ -402,6 +441,7 @@ var LfsClient = class {
   baseOrigin;
   headers;
   constructor(options) {
+    assertSafeUrl(options.baseUrl, Object.keys(options.headers ?? {}).length > 0);
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.baseOrigin = new URL(this.baseUrl).origin;
     this.headers = options.headers ?? {};
@@ -419,20 +459,14 @@ var LfsClient = class {
     const response = await fetch(href, { method: "GET", headers: this.actionHeaders(href, headers) });
     await throwIfFailed(response, "LFS download");
     if (!response.body) throw new Error("LFS download failed: response body missing");
-    const [fs, stream, streamPromises] = await Promise.all([
-      nodeImport("node:fs"),
-      nodeImport("node:stream"),
-      nodeImport("node:stream/promises")
-    ]);
-    await streamPromises.pipeline(stream.Readable.fromWeb(response.body), fs.createWriteStream(filePath));
+    await pipeline(Readable.fromWeb(response.body), createWriteStream(filePath, { flags: "wx", mode: 384 }));
   }
   async uploadFromFile(href, filePath, headers) {
-    const [fs, fsPromises] = await Promise.all([nodeImport("node:fs"), nodeImport("node:fs/promises")]);
-    const stat = await fsPromises.stat(filePath);
+    const size = (await stat(filePath)).size;
     const init = {
       method: "PUT",
-      headers: { ...this.actionHeaders(href, headers), "Content-Length": String(stat.size) },
-      body: fs.createReadStream(filePath),
+      headers: { ...this.actionHeaders(href, headers), "Content-Length": String(size) },
+      body: createReadStream(filePath),
       duplex: "half"
     };
     const response = await fetch(href, init);
@@ -440,44 +474,40 @@ var LfsClient = class {
   }
   actionHeaders(href, headers) {
     const actionOrigin = new URL(href, this.baseUrl).origin;
-    if (actionOrigin !== this.baseOrigin) return headers ?? {};
-    return mergeActionHeaders(this.headers, headers);
+    const result = actionOrigin === this.baseOrigin ? mergeActionHeaders(this.headers, headers) : headers ?? {};
+    assertSafeUrl(new URL(href, this.baseUrl).href, true);
+    return result;
   }
 };
 async function throwIfFailed(response, label) {
   if (response.ok) return;
   const body = await response.text().catch(() => "");
-  const snippet = body.slice(0, ERROR_SNIPPET_BYTES);
-  throw new Error(`${label} failed with status ${response.status}: ${snippet}`);
+  throw new Error(`${label} failed with status ${response.status}: ${body.slice(0, ERROR_SNIPPET_BYTES)}`);
 }
 
 // src/pointers.ts
+import { execFile as execFile2 } from "node:child_process";
+import { open } from "node:fs/promises";
+import { join as join3 } from "node:path";
 var VERSION_LINE = "version https://git-lfs.github.com/spec/v1";
 var OID_LINE = /^oid sha256:([0-9a-fA-F]{64})$/;
 var SIZE_LINE = /^size ([0-9]+)$/;
 var MAX_POINTER_BYTES = 1024;
-var nodeImport2 = (specifier) => import(
-  /* @vite-ignore */
-  specifier
-);
 function parsePointer(text, path) {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
   if (lines.at(-1) === "") lines.pop();
   if (lines.length !== 3 || lines[0] !== VERSION_LINE) return null;
-  const oid = OID_LINE.exec(lines[1])?.[1];
-  if (!oid) return null;
-  const sizeText = SIZE_LINE.exec(lines[2])?.[1];
-  if (!sizeText) return null;
+  const oid = OID_LINE.exec(lines[1] ?? "")?.[1];
+  const sizeText = SIZE_LINE.exec(lines[2] ?? "")?.[1];
+  if (!oid || !sizeText) return null;
   const size = Number(sizeText);
-  if (!Number.isSafeInteger(size)) return null;
-  return { path, oid: oid.toLowerCase(), size };
+  return Number.isSafeInteger(size) ? { path, oid: oid.toLowerCase(), size } : null;
 }
 async function scanPointers(repoPath) {
   const trackedPaths = await listTrackedFiles(repoPath);
-  const [fs, path] = await Promise.all([nodeImport2("node:fs/promises"), nodeImport2("node:path")]);
   const pointers = [];
   for (const trackedPath of trackedPaths) {
-    const text = await readSmallUtf8File(fs, path.join(repoPath, trackedPath));
+    const text = await readSmallUtf8File(join3(repoPath, trackedPath));
     if (text === null) continue;
     const pointer = parsePointer(text, trackedPath);
     if (pointer) pointers.push(pointer);
@@ -485,28 +515,23 @@ async function scanPointers(repoPath) {
   return pointers;
 }
 async function listTrackedFiles(repoPath) {
-  const childProcess = await nodeImport2("node:child_process");
   const stdout = await new Promise((resolve2, reject) => {
-    childProcess.execFile("git", ["-C", repoPath, "ls-files", "-z"], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 }, (error, output, stderr) => {
-      if (error) {
-        reject(new Error(`${error.message}
+    execFile2("git", ["-C", repoPath, "ls-files", "-z"], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 }, (error, output, stderr) => {
+      if (error) reject(new Error(`${error.message}
 ${stderr}`));
-        return;
-      }
-      resolve2(output);
+      else resolve2(output);
     });
   });
-  return stdout.split("\0").filter((trackedPath) => trackedPath.length > 0);
+  return stdout.split("\0").filter(Boolean);
 }
-async function readSmallUtf8File(fs, path) {
+async function readSmallUtf8File(path) {
   let file = null;
   try {
-    file = await fs.open(path, "r");
+    file = await open(path, "r");
     const bytes = new Uint8Array(MAX_POINTER_BYTES);
     const { bytesRead } = await file.read(bytes, 0, bytes.byteLength, 0);
     const chunk = bytes.subarray(0, bytesRead);
-    if (chunk.includes(0)) return null;
-    return new TextDecoder("utf-8", { fatal: true }).decode(chunk);
+    return chunk.includes(0) ? null : new TextDecoder("utf-8", { fatal: true }).decode(chunk);
   } catch {
     return null;
   } finally {
@@ -515,10 +540,6 @@ async function readSmallUtf8File(fs, path) {
 }
 
 // src/migrate.ts
-var nodeImport3 = (specifier) => import(
-  /* @vite-ignore */
-  specifier
-);
 async function migrate(options, deps = {}) {
   const scan = deps.scanPointers ?? scanPointers;
   const createClient = deps.createClient ?? ((clientOptions) => new LfsClient(clientOptions));
@@ -526,20 +547,23 @@ async function migrate(options, deps = {}) {
   const removeFile = deps.removeFile ?? defaultRemoveFile;
   const getGitConfig = deps.getGitConfig ?? getGitConfigValue;
   const setGitConfig = deps.setGitConfig ?? setGitConfigValue;
+  assertSafeUrl(options.targetUrl, true);
   const pointers = await scan(options.repoPath);
-  const uniqueObjects = uniqueLfsObjects(pointers);
+  const { objects, conflicts } = classifyPointers(pointers);
+  const unique = objects.length + conflicts.length;
   const result = {
     scanned: pointers.length,
-    unique: uniqueObjects.length,
+    unique,
     migrated: 0,
-    skipped: pointers.length - uniqueObjects.length,
-    failed: []
+    skipped: pointers.length - unique,
+    failed: conflicts
   };
   if (options.dryRun) return result;
-  const sourceUrl = options.sourceUrl ?? await getGitConfig(options.repoPath, "lfs.url");
-  const source = createClient({ baseUrl: sourceUrl.trim(), headers: options.sourceHeaders });
+  const sourceUrl = (options.sourceUrl ?? await getGitConfig(options.repoPath, "lfs.url")).trim();
+  assertSafeUrl(sourceUrl, Object.keys(options.sourceHeaders).length > 0);
+  const source = createClient({ baseUrl: sourceUrl, headers: options.sourceHeaders });
   const target = createClient({ baseUrl: options.targetUrl, headers: { Authorization: `Bearer ${options.targetToken}` } });
-  await runPool(uniqueObjects, options.concurrency, async (object) => {
+  await runPool(objects, options.concurrency, async (object) => {
     const tempPath = await createTempPath();
     try {
       const download = await batchAction(source, "download", object, "download");
@@ -552,8 +576,7 @@ async function migrate(options, deps = {}) {
         return;
       }
       await target.uploadFromFile(upload.href, tempPath, upload.header);
-      const targetDownload = await batchAction(target, "download", object, "download");
-      if (!targetDownload) throw new Error("target download action missing");
+      if (!await batchAction(target, "download", object, "download")) throw new Error("target download action missing");
       result.migrated += 1;
     } catch (error) {
       result.failed.push({ oid: object.oid, reason: errorMessage(error) });
@@ -561,20 +584,21 @@ async function migrate(options, deps = {}) {
       await removeFile(tempPath).catch(() => void 0);
     }
   });
-  if (options.writeConfig && result.failed.length === 0) {
-    await setGitConfig(options.repoPath, "lfs.url", options.targetUrl);
-  }
+  if (options.writeConfig && result.failed.length === 0) await setGitConfig(options.repoPath, "lfs.url", options.targetUrl);
   return result;
 }
-function uniqueLfsObjects(pointers) {
-  const seen = /* @__PURE__ */ new Set();
-  const objects = [];
+function classifyPointers(pointers) {
+  const sizes = /* @__PURE__ */ new Map();
+  const conflicts = /* @__PURE__ */ new Map();
   for (const pointer of pointers) {
-    if (seen.has(pointer.oid)) continue;
-    seen.add(pointer.oid);
-    objects.push({ oid: pointer.oid, size: pointer.size });
+    const size = sizes.get(pointer.oid);
+    if (size === void 0) sizes.set(pointer.oid, pointer.size);
+    else if (size !== pointer.size) conflicts.set(pointer.oid, /* @__PURE__ */ new Set([size, pointer.size, ...conflicts.get(pointer.oid) ?? []]));
   }
-  return objects;
+  return {
+    objects: [...sizes].filter(([oid]) => !conflicts.has(oid)).map(([oid, size]) => ({ oid, size })),
+    conflicts: [...conflicts].map(([oid, values]) => ({ oid, reason: `conflicting pointer sizes: ${[...values].sort((a, b) => a - b).join(", ")}` }))
+  };
 }
 async function batchAction(client, operation, object, action) {
   const response = await client.batch(operation, [object]);
@@ -589,15 +613,14 @@ async function runPool(items, concurrency, worker) {
     while (index < items.length) {
       const item = items[index];
       index += 1;
-      await worker(item);
+      if (item !== void 0) await worker(item);
     }
   });
   await Promise.all(workers);
 }
 async function sha256File(path) {
-  const [fs, cryptoModule] = await Promise.all([nodeImport3("node:fs"), nodeImport3("node:crypto")]);
-  const hash = cryptoModule.createHash("sha256");
-  const stream = fs.createReadStream(path);
+  const hash = createHash("sha256");
+  const stream = createReadStream2(path);
   return await new Promise((resolve2, reject) => {
     stream.on("data", (chunk) => hash.update(chunk));
     stream.on("error", reject);
@@ -605,12 +628,10 @@ async function sha256File(path) {
   });
 }
 async function defaultCreateTempPath() {
-  const [os, path] = await Promise.all([nodeImport3("node:os"), nodeImport3("node:path")]);
-  return path.join(os.tmpdir(), `git-me-migrate-${crypto.randomUUID()}`);
+  return join4(await mkdtemp2(join4(tmpdir2(), "git-me-migrate-")), "object");
 }
 async function defaultRemoveFile(path) {
-  const fs = await nodeImport3("node:fs/promises");
-  await fs.rm(path, { force: true });
+  await rm2(dirname3(path), { recursive: true, force: true });
 }
 async function getGitConfigValue(repoPath, key) {
   return (await execGit(repoPath, ["config", "--get", key])).trim();
@@ -619,15 +640,11 @@ async function setGitConfigValue(repoPath, key, value) {
   await execGit(repoPath, ["config", key, value]);
 }
 async function execGit(repoPath, args) {
-  const childProcess = await nodeImport3("node:child_process");
   return await new Promise((resolve2, reject) => {
-    childProcess.execFile("git", ["-C", repoPath, ...args], { encoding: "utf8" }, (error, stdout, stderr) => {
-      if (error) {
-        reject(new Error(`${error.message}
+    execFile3("git", ["-C", repoPath, ...args], { encoding: "utf8" }, (error, stdout, stderr) => {
+      if (error) reject(new Error(`${error.message}
 ${stderr}`));
-        return;
-      }
-      resolve2(stdout);
+      else resolve2(stdout);
     });
   });
 }
@@ -750,6 +767,7 @@ async function parseUserArgs(args, io) {
   let jsonOutput = false;
   for (let index = 1; index < args.length; index += 1) {
     const arg = args[index];
+    if (!arg) continue;
     if (!arg.startsWith("--")) {
       if (username) return { error: "duplicate username" };
       username = arg;
@@ -803,6 +821,11 @@ async function parseUserArgs(args, io) {
     if (storedToken) token = { value: storedToken };
   }
   if (!targetUrl) return { error: "missing profile; deploy a worker first or provide --target" };
+  try {
+    assertSafeUrl(targetUrl, true);
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
   if (!token) return { error: "missing admin credential; provide --token-env or --token-stdin" };
   if (action !== "list" && !username) return { error: "missing username" };
   if (action === "add" && access !== "read" && access !== "write") return { error: "invalid --access read|write" };
@@ -830,6 +853,7 @@ async function parseUserArgs(args, io) {
   }
 }
 async function requestUser(options) {
+  assertSafeUrl(options.targetUrl, true);
   const path = options.action === "list" ? "/admin/users" : `/admin/users/${encodeURIComponent(options.username || "")}`;
   const url = new URL(path, options.targetUrl.endsWith("/") ? options.targetUrl : `${options.targetUrl}/`);
   const res = await fetch(url, {
@@ -928,6 +952,12 @@ async function parseMigrateArgs(args, defaultRepoPath, io) {
   }
   if (!targetUrl) return { error: "missing required option: --target" };
   if (!targetToken) return { error: "missing required option: --token-env or --token-stdin" };
+  try {
+    assertSafeUrl(targetUrl, true);
+    if (sourceUrl) assertSafeUrl(sourceUrl, sourceHeaderSources.length > 0);
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
   try {
     const sourceHeaders = {};
     for (const source of sourceHeaderSources) {
@@ -1090,7 +1120,7 @@ async function readPassword(prompt) {
 function removeLastUtf8CodePoint(bytes) {
   if (bytes.length === 0) return;
   let index = bytes.length - 1;
-  while (index > 0 && (bytes[index] & 192) === 128) index -= 1;
+  while (index > 0 && ((bytes[index] ?? 0) & 192) === 128) index -= 1;
   bytes.splice(index);
 }
 function isMainEntry() {

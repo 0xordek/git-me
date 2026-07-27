@@ -8,6 +8,7 @@ type FsPromises = {
   readFile(path: string): Promise<BufferLike>;
   rm(path: string, options: { recursive: boolean; force: boolean }): Promise<void>;
   writeFile(path: string, data: string | Uint8Array): Promise<void>;
+  stat(path: string): Promise<{ mode: number }>;
 };
 type Os = { tmpdir(): string };
 type Path = { join(...parts: string[]): string };
@@ -97,6 +98,13 @@ describe('LfsClient file transfers', () => {
     await new LfsClient({ baseUrl: 'https://host', headers: { Authorization: 'Bearer base' } }).downloadToFile('https://host/objects/1', path, { 'X-Action': 'yes' });
 
     expect((await fs.readFile(path)).toString()).toBe('\x01\x02\x03');
+    expect((await fs.stat(path)).mode & 0o777).toBe(0o600);
+  });
+
+  test('downloadToFile refuses to overwrite an existing path', async () => {
+    const { path } = await createTempFile('existing.bin', 'keep');
+    mockFetch(new Response('replacement'));
+    await expect(new LfsClient({ baseUrl: 'https://host' }).downloadToFile('https://host/object', path)).rejects.toThrow(/exist/i);
   });
 
   test('downloadToFile omits base auth headers for cross-origin action URLs', async () => {
@@ -141,5 +149,11 @@ describe('LfsClient file transfers', () => {
     expect(headers.get('X-Source')).toBeNull();
     expect(headers.get('X-Action')).toBe('yes');
     expect(headers.get('Content-Length')).toBe('7');
+  });
+
+  test('rejects secret-bearing HTTP except on loopback', () => {
+    expect(() => new LfsClient({ baseUrl: 'http://example.com', headers: { Authorization: 'Bearer token' } })).toThrow('must use HTTPS');
+    expect(() => new LfsClient({ baseUrl: 'http://127.0.0.1:8787', headers: { Authorization: 'Bearer token' } })).not.toThrow();
+    expect(() => new LfsClient({ baseUrl: 'https://user:pass@example.com' })).toThrow('embedded credentials');
   });
 });

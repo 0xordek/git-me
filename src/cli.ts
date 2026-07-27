@@ -5,6 +5,7 @@ import { deployWorker, credentialKey, type DeployOptions, type DeployResult } fr
 import { migrate, type MigrateOptions, type MigrationResult } from './migrate';
 import { createProfileStore, type ProfileStore } from './profile';
 import type { HeaderMap } from './lfs-client';
+import { assertSafeUrl } from './url';
 
 export type CliIO = {
   stdout?: (text: string) => void;
@@ -154,6 +155,7 @@ async function parseUserArgs(args: string[], io: CliIO): Promise<{ options: User
 
   for (let index = 1; index < args.length; index += 1) {
     const arg = args[index];
+    if (!arg) continue;
     if (!arg.startsWith('--')) {
       if (username) return { error: 'duplicate username' };
       username = arg;
@@ -213,6 +215,11 @@ async function parseUserArgs(args: string[], io: CliIO): Promise<{ options: User
   }
 
   if (!targetUrl) return { error: 'missing profile; deploy a worker first or provide --target' };
+  try {
+    assertSafeUrl(targetUrl, true);
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
   if (!token) return { error: 'missing admin credential; provide --token-env or --token-stdin' };
   if (action !== 'list' && !username) return { error: 'missing username' };
   if (action === 'add' && access !== 'read' && access !== 'write') return { error: 'invalid --access read|write' };
@@ -242,6 +249,7 @@ async function parseUserArgs(args: string[], io: CliIO): Promise<{ options: User
 }
 
 async function requestUser(options: UserOptions): Promise<UserResult> {
+  assertSafeUrl(options.targetUrl, true);
   const path = options.action === 'list' ? '/admin/users' : `/admin/users/${encodeURIComponent(options.username || '')}`;
   const url = new URL(path, options.targetUrl.endsWith('/') ? options.targetUrl : `${options.targetUrl}/`);
   const res = await fetch(url, {
@@ -351,6 +359,12 @@ async function parseMigrateArgs(args: string[], defaultRepoPath: string, io: Cli
 
   if (!targetUrl) return { error: 'missing required option: --target' };
   if (!targetToken) return { error: 'missing required option: --token-env or --token-stdin' };
+  try {
+    assertSafeUrl(targetUrl, true);
+    if (sourceUrl) assertSafeUrl(sourceUrl, sourceHeaderSources.length > 0);
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
 
   try {
     const sourceHeaders: HeaderMap = {};
@@ -489,7 +503,7 @@ async function readPassword(prompt: string): Promise<string> {
 function removeLastUtf8CodePoint(bytes: number[]): void {
   if (bytes.length === 0) return;
   let index = bytes.length - 1;
-  while (index > 0 && (bytes[index] & 0xc0) === 0x80) index -= 1;
+  while (index > 0 && ((bytes[index] ?? 0) & 0xc0) === 0x80) index -= 1;
   bytes.splice(index);
 }
 

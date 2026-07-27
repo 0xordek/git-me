@@ -15,22 +15,28 @@ export function createCredentialStore(): CredentialStore {
 
 class SystemCredentialStore implements CredentialStore {
   async get(key: string): Promise<string | null> {
-    if (platform() === 'darwin') return await macGet(key);
-    if (platform() === 'linux') return await linuxGet(key);
-    return await windowsGet(key);
+    const os = platform();
+    if (os === 'darwin') return await macGet(key);
+    if (os === 'linux') return await linuxGet(key);
+    if (os === 'win32') return await windowsGet(key);
+    throw new Error(`credential store unsupported on ${os}`);
   }
 
   async set(key: string, value: string): Promise<void> {
     if (!value) throw new Error('credential cannot be empty');
-    if (platform() === 'darwin') return await macSet(key, value);
-    if (platform() === 'linux') return await linuxSet(key, value);
-    return await windowsSet(key, value);
+    const os = platform();
+    if (os === 'darwin') return await macSet(key, value);
+    if (os === 'linux') return await linuxSet(key, value);
+    if (os === 'win32') return await windowsSet(key, value);
+    throw new Error(`credential store unsupported on ${os}`);
   }
 
   async delete(key: string): Promise<void> {
-    if (platform() === 'darwin') return await macDelete(key);
-    if (platform() === 'linux') return await linuxDelete(key);
-    return await windowsDelete(key);
+    const os = platform();
+    if (os === 'darwin') return await macDelete(key);
+    if (os === 'linux') return await linuxDelete(key);
+    if (os === 'win32') return await windowsDelete(key);
+    throw new Error(`credential store unsupported on ${os}`);
   }
 }
 
@@ -40,7 +46,7 @@ async function macGet(key: string): Promise<string | null> {
 }
 
 async function macSet(key: string, value: string): Promise<void> {
-  await run('security', ['add-generic-password', '-U', '-a', SERVICE, '-s', key], value);
+  await run('security', ['add-generic-password', '-U', '-a', SERVICE, '-s', key, '-w'], value);
 }
 
 async function macDelete(key: string): Promise<void> {

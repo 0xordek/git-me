@@ -19,6 +19,7 @@ npm run check
 - Never commit secrets. Use `wrangler secret put GITME_AUTH_TOKEN`.
 - Add or update tests for behavior changes.
 - When touching Git LFS batch actions, cover proxy upload plus proxy and direct-download behavior.
+- Worker and Durable Object behavior must also pass `npm run test:workers` in the local Workers runtime.
 - Do not add secret-valued CLI arguments. Use environment variables or standard input.
 - When touching migration CLI code, run or update the CLI and migration tests in `test/cli.test.ts` and `test/migrate.test.ts`.
 - Update `README.md`, `SECURITY.md`, and `CHANGELOG.md` when public behavior or security changes.
@@ -32,3 +33,4 @@ npm run check
 ```
 
 `npm run check` rebuilds `dist/cli.js` and fails when committed output is stale.
+It also checks generated Wrangler binding types and runs both Node and Workers-runtime test projects.
