@@ -6,7 +6,12 @@ import { timingSafeEqual } from './crypto';
 const RECORD_KEY = 'record';
 const USERS_KEY = 'users';
 const ATTEMPTS_PREFIX = 'attempts:';
-const PBKDF2_ITERATIONS = 600_000;
+// Workers WebCrypto rejects PBKDF2 above 100,000 iterations, so this is the
+// ceiling rather than a tuning choice. Records written before 0.5.1 carry no
+// iteration count and were derived with LEGACY_PBKDF2_ITERATIONS.
+export const PBKDF2_ITERATIONS = 100_000;
+export const MAX_PBKDF2_ITERATIONS = 100_000;
+const LEGACY_PBKDF2_ITERATIONS = 600_000;
 const MAX_FAILURES = 5;
 const FAILURE_WINDOW_MS = 60_000;
 const LOCKOUT_MS = 60_000;
@@ -16,6 +21,7 @@ type UserRecord = {
   access: UserAccess;
   salt: string;
   hash: string;
+  iterations?: number;
   indexed?: true;
 };
 
@@ -178,20 +184,33 @@ function attemptKey(source: string): string {
 
 async function createRecord(password: string, access: UserAccess): Promise<UserRecord> {
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  return { version: 1, access, salt: bytesToBase64(salt), hash: await passwordHash(password, salt) };
+  return {
+    version: 1,
+    access,
+    salt: bytesToBase64(salt),
+    hash: await passwordHash(password, salt, PBKDF2_ITERATIONS),
+    iterations: PBKDF2_ITERATIONS,
+  };
 }
 
 async function verifyPassword(password: string, record: UserRecord): Promise<boolean> {
+  const iterations = recordIterations(record);
+  if (!iterations) return false;
   try {
-    return timingSafeEqual(base64ToBytes(await passwordHash(password, base64ToBytes(record.salt))), base64ToBytes(record.hash));
+    return timingSafeEqual(base64ToBytes(await passwordHash(password, base64ToBytes(record.salt), iterations)), base64ToBytes(record.hash));
   } catch {
     return false;
   }
 }
 
-async function passwordHash(password: string, salt: Uint8Array): Promise<string> {
+function recordIterations(record: UserRecord): number | null {
+  if (record.iterations === undefined) return LEGACY_PBKDF2_ITERATIONS;
+  return Number.isInteger(record.iterations) && record.iterations > 0 ? record.iterations : null;
+}
+
+async function passwordHash(password: string, salt: Uint8Array, iterations: number): Promise<string> {
   const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: salt.slice().buffer, iterations: PBKDF2_ITERATIONS }, key, 256);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: salt.slice().buffer, iterations }, key, 256);
   return bytesToBase64(new Uint8Array(bits));
 }
 

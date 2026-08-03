@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.5.1 - 2026-08-03
+
+- Fixed user creation failing with HTTP 500 on Cloudflare: password records requested 600,000 PBKDF2 iterations, above the 100,000 the Workers runtime accepts. Deployments on 0.3.0–0.5.0 must redeploy and create their users again.
+- Stored the PBKDF2 iteration count with each password record and kept verifying pre-0.5.1 records at 600,000, so records written by a runtime without the limit still authenticate.
+- Added a Workers-runtime regression test covering the iteration ceiling and pre-0.5.1 record verification.
+- Documented the 100 MB proxy-upload limit, the direct-to-R2 workaround for larger objects, and `lfs.concurrenttransfers` guidance for bulk pushes.
+- Validated Batch API and admin request bodies as objects, normalized object IDs once per request, and returned `X-Request-Id` on health and configuration failures.
+- Validated profile files and migration concurrency, checked downloaded object size against the pointer, merged Git LFS action headers case-insensitively, and rejected malformed batch responses and pointer files.
+
 ## 0.5.0 - 2026-07-12
 
 - Fixed macOS Keychain writes so generated admin secrets are supplied through stdin with the required `-w` prompt option.

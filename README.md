@@ -58,6 +58,17 @@ unset GITME_AUTH_TOKEN
 
 Replace `default` in the Keychain service name for another profile. Environment and stdin token options remain available if Keychain cannot be used.
 
+### User creation recovery for 0.3.0–0.5.0
+
+Those releases derived password records with 600,000 PBKDF2 iterations, above the 100,000 iteration limit Workers WebCrypto accepts. Every `git-me user add` against a deployed Worker fails with HTTP 500 and the Worker logs `Pbkdf2 failed: iteration counts above 100000 are not supported`. Redeploy the Worker with 0.5.1 or later, then create the users again:
+
+```bash
+git-me worker deploy --profile <name>
+git-me user add <username> --profile <name> --access write
+```
+
+Password records written by those releases cannot exist on Cloudflare, because creation never succeeded. Records written by a self-hosted `workerd` without the limit keep working; 0.5.1 stores the iteration count with each record and verifies pre-0.5.1 records at 600,000.
+
 ## Quick Start (development)
 
 ```bash
@@ -98,6 +109,25 @@ wrangler secret put GITME_AUTH_TOKEN
 - `direct`: opt-in download acceleration. Uploads still use the Worker so every object gets SHA-256 verification; downloads receive short-lived signed R2 `GET` URLs.
 
 Leave `GITME_TRANSFER_MODE` unset for `proxy`, or set it to `direct` to opt in to signed R2 downloads. Give direct mode a bucket-scoped, read-only R2 S3 API token.
+
+## Limits
+
+Uploads pass through the Worker in both transfer modes, so they inherit the Cloudflare 100 MB request-body limit. Cloudflare rejects a larger `PUT /objects/{oid}` at the edge with HTTP 413 before the Worker runs, so nothing appears in Worker logs and `git lfs push` reports the failure without a server-side trace. Downloads have no such limit.
+
+Until presigned or multipart uploads land, write objects above 100 MB straight to R2 through the S3-compatible endpoint. Verify the local digest against the OID first, because a direct write bypasses the Worker's SHA-256 check:
+
+```bash
+sha256sum .git/lfs/objects/<xx>/<yy>/<oid>
+aws s3api put-object \
+  --endpoint-url "https://<account-id>.r2.cloudflarestorage.com" \
+  --bucket <bucket> --key "objects/<oid>" \
+  --body ".git/lfs/objects/<xx>/<yy>/<oid>" \
+  --metadata "sha256=<oid>"
+```
+
+The `sha256=<oid>` user metadata becomes the R2 `customMetadata` marker the Worker writes after a verified proxy upload. Downloads work without it, but an upload batch keeps asking the client to send the object again, and `direct` mode falls back to proxy downloads. `wrangler r2 object put` cannot set custom metadata.
+
+A single `AuthUser` Durable Object handles every request for one username and runs PBKDF2 per request. Keep `git config lfs.concurrenttransfers 2` for bulk pushes; the default of 8 can saturate the object and return HTTP 503.
 
 ## Configuration
 
