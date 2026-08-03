@@ -155,8 +155,8 @@ var FileProfileStore = class {
   filePath;
   async get(name) {
     const file = await readProfileFile(this.filePath);
-    const profile = file.profiles[name];
-    return profile && profile.name === name ? profile : null;
+    const profile = Object.hasOwn(file.profiles, name) ? file.profiles[name] : void 0;
+    return profile ?? null;
   }
   async save(profile) {
     const file = await readProfileFile(this.filePath);
@@ -172,16 +172,30 @@ var FileProfileStore = class {
 async function readProfileFile(filePath) {
   try {
     const parsed = JSON.parse(await readFile(filePath, "utf8"));
-    if (parsed.version !== 1 || !parsed.profiles || typeof parsed.profiles !== "object") throw new Error(`invalid profile file: ${filePath}`);
+    if (!isRecord(parsed) || parsed.version !== 1 || !isRecord(parsed.profiles)) throw new Error(`invalid profile file: ${filePath}`);
+    const profiles = emptyProfiles();
+    for (const [name, profile] of Object.entries(parsed.profiles)) {
+      if (!isWorkerProfile(profile) || profile.name !== name) throw new Error(`invalid profile file: ${filePath}`);
+      profiles[name] = profile;
+    }
     return {
       version: 1,
-      profiles: parsed.profiles
+      profiles
     };
   } catch (error) {
-    if (error.code === "ENOENT") return { version: 1, profiles: {} };
+    if (error.code === "ENOENT") return { version: 1, profiles: emptyProfiles() };
     if (error instanceof SyntaxError) throw new Error(`invalid profile file: ${filePath}`);
     throw error;
   }
+}
+function emptyProfiles() {
+  return /* @__PURE__ */ Object.create(null);
+}
+function isWorkerProfile(value) {
+  return isRecord(value) && typeof value.name === "string" && typeof value.endpoint === "string" && typeof value.workerName === "string" && typeof value.createdAt === "string" && (!("accountId" in value) || typeof value.accountId === "string") && (!("bucketName" in value) || typeof value.bucketName === "string") && (!("kvNamespaceId" in value) || typeof value.kvNamespaceId === "string");
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function profileFilePath(env) {
   if (env.GITME_CONFIG_DIR) return join(env.GITME_CONFIG_DIR, "profiles.json");
@@ -434,7 +448,10 @@ function assertSafeUrl(value, secretBearing) {
 var LFS_JSON = "application/vnd.git-lfs+json";
 var ERROR_SNIPPET_BYTES = 200;
 function mergeActionHeaders(base, actionHeaders) {
-  return { ...base, ...actionHeaders ?? {} };
+  const result = {};
+  for (const [name, value] of Object.entries(base)) setHeader(result, name, value);
+  for (const [name, value] of Object.entries(actionHeaders ?? {})) setHeader(result, name, value);
+  return result;
 }
 var LfsClient = class {
   baseUrl;
@@ -453,7 +470,9 @@ var LfsClient = class {
       body: JSON.stringify({ operation, transfers: ["basic"], objects })
     });
     await throwIfFailed(response, "LFS batch");
-    return await response.json();
+    const body = await response.json();
+    if (!isBatchResponse(body)) throw new Error("LFS batch response malformed");
+    return body;
   }
   async downloadToFile(href, filePath, headers) {
     const response = await fetch(href, { method: "GET", headers: this.actionHeaders(href, headers) });
@@ -484,6 +503,22 @@ async function throwIfFailed(response, label) {
   const body = await response.text().catch(() => "");
   throw new Error(`${label} failed with status ${response.status}: ${body.slice(0, ERROR_SNIPPET_BYTES)}`);
 }
+function setHeader(headers, name, value) {
+  const existing = Object.keys(headers).find((key) => key.toLowerCase() === name.toLowerCase());
+  if (existing) delete headers[existing];
+  headers[name] = value;
+}
+function isBatchResponse(value) {
+  return isRecord2(value) && (value.transfer === void 0 || typeof value.transfer === "string") && Array.isArray(value.objects) && value.objects.every(isBatchObject);
+}
+function isBatchObject(value) {
+  if (!isRecord2(value) || typeof value.oid !== "string" || typeof value.size !== "number") return false;
+  if (value.error !== void 0 && (!isRecord2(value.error) || typeof value.error.code !== "number" || typeof value.error.message !== "string")) return false;
+  return true;
+}
+function isRecord2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 // src/pointers.ts
 import { execFile as execFile2 } from "node:child_process";
@@ -493,12 +528,26 @@ var VERSION_LINE = "version https://git-lfs.github.com/spec/v1";
 var OID_LINE = /^oid sha256:([0-9a-fA-F]{64})$/;
 var SIZE_LINE = /^size ([0-9]+)$/;
 var MAX_POINTER_BYTES = 1024;
+var POINTER_KEY = /^[a-z0-9.-]+$/;
 function parsePointer(text, path) {
+  if (new TextEncoder().encode(text).byteLength > MAX_POINTER_BYTES) return null;
   const lines = text.replace(/\r\n/g, "\n").split("\n");
   if (lines.at(-1) === "") lines.pop();
-  if (lines.length !== 3 || lines[0] !== VERSION_LINE) return null;
-  const oid = OID_LINE.exec(lines[1] ?? "")?.[1];
-  const sizeText = SIZE_LINE.exec(lines[2] ?? "")?.[1];
+  if (lines.length < 3 || lines[0] !== VERSION_LINE) return null;
+  let previousKey = "";
+  let oid;
+  let sizeText;
+  const keys = /* @__PURE__ */ new Set(["version"]);
+  for (const line of lines.slice(1)) {
+    const separator = line.indexOf(" ");
+    const key = line.slice(0, separator);
+    const value = line.slice(separator + 1);
+    if (separator < 1 || !POINTER_KEY.test(key) || !value || previousKey && key <= previousKey || keys.has(key)) return null;
+    previousKey = key;
+    keys.add(key);
+    if (key === "oid") oid = OID_LINE.exec(line)?.[1];
+    if (key === "size") sizeText = SIZE_LINE.exec(line)?.[1];
+  }
   if (!oid || !sizeText) return null;
   const size = Number(sizeText);
   return Number.isSafeInteger(size) ? { path, oid: oid.toLowerCase(), size } : null;
@@ -528,8 +577,9 @@ async function readSmallUtf8File(path) {
   let file = null;
   try {
     file = await open(path, "r");
-    const bytes = new Uint8Array(MAX_POINTER_BYTES);
+    const bytes = new Uint8Array(MAX_POINTER_BYTES + 1);
     const { bytesRead } = await file.read(bytes, 0, bytes.byteLength, 0);
+    if (bytesRead > MAX_POINTER_BYTES) return null;
     const chunk = bytes.subarray(0, bytesRead);
     return chunk.includes(0) ? null : new TextDecoder("utf-8", { fatal: true }).decode(chunk);
   } catch {
@@ -541,6 +591,7 @@ async function readSmallUtf8File(path) {
 
 // src/migrate.ts
 async function migrate(options, deps = {}) {
+  if (!Number.isInteger(options.concurrency) || options.concurrency < 1 || options.concurrency > 16) throw new Error("invalid concurrency");
   const scan = deps.scanPointers ?? scanPointers;
   const createClient = deps.createClient ?? ((clientOptions) => new LfsClient(clientOptions));
   const createTempPath = deps.createTempPath ?? defaultCreateTempPath;
@@ -569,7 +620,9 @@ async function migrate(options, deps = {}) {
       const download = await batchAction(source, "download", object, "download");
       if (!download) throw new Error("download action missing");
       await source.downloadToFile(download.href, tempPath, download.header);
-      if (await sha256File(tempPath) !== object.oid) throw new Error("hash mismatch");
+      const digest = await sha256File(tempPath);
+      if (digest.hex !== object.oid) throw new Error("hash mismatch");
+      if (digest.size !== object.size) throw new Error("download size mismatch");
       const upload = await batchAction(target, "upload", object, "upload");
       if (!upload) {
         result.skipped += 1;
@@ -584,6 +637,7 @@ async function migrate(options, deps = {}) {
       await removeFile(tempPath).catch(() => void 0);
     }
   });
+  result.failed.sort((left, right) => left.oid.localeCompare(right.oid));
   if (options.writeConfig && result.failed.length === 0) await setGitConfig(options.repoPath, "lfs.url", options.targetUrl);
   return result;
 }
@@ -621,10 +675,14 @@ async function runPool(items, concurrency, worker) {
 async function sha256File(path) {
   const hash = createHash("sha256");
   const stream = createReadStream2(path);
+  let size = 0;
   return await new Promise((resolve2, reject) => {
-    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("data", (chunk) => {
+      hash.update(chunk);
+      size += chunk.length;
+    });
     stream.on("error", reject);
-    stream.on("end", () => resolve2(hash.digest("hex")));
+    stream.on("end", () => resolve2({ hex: hash.digest("hex"), size }));
   });
 }
 async function defaultCreateTempPath() {

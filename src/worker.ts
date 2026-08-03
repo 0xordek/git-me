@@ -47,14 +47,14 @@ export default {
       const url = new URL(request.url);
       path = url.pathname;
       if (request.method === 'GET' && url.pathname === '/health') {
-        return healthResponse(env);
+        return withRequestId(healthResponse(env), requestId);
       }
 
       let config: AppConfig;
       try {
         config = loadConfig(env);
       } catch (error) {
-        if (error instanceof ConfigError) return lfsError(500, 'configuration error');
+        if (error instanceof ConfigError) return withRequestId(lfsError(500, 'configuration error'), requestId);
         throw error;
       }
       if (url.pathname === '/admin/users') return await handleAdminUsers(request, env, config);
@@ -103,7 +103,9 @@ async function handleBatch(request: Request, env: Env, config: AppConfig): Promi
 
   let body: LfsBatchRequest;
   try {
-    body = (await request.json()) as LfsBatchRequest;
+    const parsed: unknown = await request.json();
+    if (!isRecord(parsed)) return lfsError(400, 'request body must be an object');
+    body = parsed as LfsBatchRequest;
   } catch {
     return lfsError(400, 'invalid JSON');
   }
@@ -118,9 +120,9 @@ async function handleBatch(request: Request, env: Env, config: AppConfig): Promi
 
   const objects: LfsBatchObject[] = [];
   for (const obj of body.objects) {
-    const validation = validateObject(obj);
-    if (validation) return lfsError(400, validation);
-    objects.push(obj as LfsBatchObject);
+    const parsed = parseObject(obj);
+    if (typeof parsed === 'string') return lfsError(400, parsed);
+    objects.push(parsed);
   }
 
   const responseObjects = [];
@@ -128,7 +130,7 @@ async function handleBatch(request: Request, env: Env, config: AppConfig): Promi
     const href = new URL(`/objects/${obj.oid}`, request.url).href;
     if (body.operation === 'upload') {
       const existing = await env.GITME_R2.head(OBJECT_PREFIX + obj.oid);
-      if (existing?.customMetadata?.sha256 === obj.oid.toLowerCase()) {
+      if (existing?.customMetadata?.sha256 === obj.oid) {
         responseObjects.push(existing.size === obj.size ? { oid: obj.oid, size: obj.size } : objectConflict(obj));
         continue;
       }
@@ -142,7 +144,7 @@ async function handleBatch(request: Request, env: Env, config: AppConfig): Promi
       continue;
     }
     if (config.transferMode === 'direct' && config.r2Signing) {
-      if (head.customMetadata?.sha256 !== obj.oid.toLowerCase()) {
+      if (head.customMetadata?.sha256 !== obj.oid) {
         responseObjects.push({ oid: obj.oid, size: head.size, actions: { download: { href } } });
         continue;
       }
@@ -170,10 +172,11 @@ async function handleBatch(request: Request, env: Env, config: AppConfig): Promi
 }
 
 async function handleUpload(request: Request, env: Env, oid: string): Promise<Response> {
-  if (!OID_RE.test(oid)) return lfsError(400, 'invalid oid');
+  const normalizedOid = normalizeOid(oid);
+  if (!normalizedOid) return lfsError(400, 'invalid oid');
   if (!request.body) return lfsError(400, 'missing request body');
 
-  const objectKey = OBJECT_PREFIX + oid;
+  const objectKey = OBJECT_PREFIX + normalizedOid;
   const tempKey = OBJECT_PREFIX + '.tmp/' + crypto.randomUUID();
   const [storeStream, digestStream] = request.body.tee();
   const putPromise = env.GITME_R2.put(tempKey, storeStream);
@@ -182,13 +185,13 @@ async function handleUpload(request: Request, env: Env, oid: string): Promise<Re
     const [stored, digested] = await Promise.allSettled([putPromise, digestAndCount(digestStream)]);
     if (stored.status === 'rejected') throw stored.reason;
     if (digested.status === 'rejected') throw digested.reason;
-    if (digested.value.hex.toLowerCase() !== oid.toLowerCase()) return lfsError(400, 'upload hash mismatch');
+    if (digested.value.hex !== normalizedOid) return lfsError(400, 'upload hash mismatch');
     const declaredSize = request.headers.get('Content-Length');
     if (declaredSize !== null && Number(declaredSize) !== digested.value.size) return lfsError(400, 'upload size mismatch');
 
     const tempObject = await env.GITME_R2.get(tempKey);
     if (!tempObject?.body) throw new Error('temporary upload missing');
-    await env.GITME_R2.put(objectKey, tempObject.body, { customMetadata: { sha256: oid.toLowerCase() } });
+    await env.GITME_R2.put(objectKey, tempObject.body, { customMetadata: { sha256: normalizedOid } });
     return new Response(null, { status: 200 });
   } catch (error) {
     operationFailed = true;
@@ -216,7 +219,9 @@ async function handleAdminUser(request: Request, env: Env, config: AppConfig, ra
   if (request.method === 'PUT') {
     let body: { password?: unknown; access?: unknown };
     try {
-      body = await request.json() as { password?: unknown; access?: unknown };
+      const parsed: unknown = await request.json();
+      if (!isRecord(parsed)) return appJson(400, { message: 'request body must be an object' });
+      body = parsed as { password?: unknown; access?: unknown };
     } catch {
       return appJson(400, { message: 'invalid JSON' });
     }
@@ -242,8 +247,9 @@ async function handleAdminUsers(request: Request, env: Env, config: AppConfig): 
 }
 
 async function handleDownload(env: Env, oid: string): Promise<Response> {
-  if (!OID_RE.test(oid)) return lfsError(400, 'invalid oid');
-  const object = await env.GITME_R2.get(OBJECT_PREFIX + oid);
+  const normalizedOid = normalizeOid(oid);
+  if (!normalizedOid) return lfsError(400, 'invalid oid');
+  const object = await env.GITME_R2.get(OBJECT_PREFIX + normalizedOid);
   if (!object) return lfsError(404, 'object not found');
 
   return new Response(object.body, {
@@ -270,14 +276,18 @@ function selectTransfer(transfers: unknown): string {
   return transfers.includes('basic') ? 'basic' : '';
 }
 
-function validateObject(obj: unknown): string {
-  if (!isObjectRecord(obj) || !OID_RE.test(String(obj.oid || ''))) return 'invalid oid';
-  if (!Number.isSafeInteger(obj.size) || obj.size < 0) return 'object size must be a non-negative safe integer';
-  return '';
+function parseObject(obj: unknown): LfsBatchObject | string {
+  if (!isRecord(obj) || typeof obj.oid !== 'string' || !OID_RE.test(obj.oid)) return 'invalid oid';
+  if (typeof obj.size !== 'number' || !Number.isSafeInteger(obj.size) || obj.size < 0) return 'object size must be a non-negative safe integer';
+  return { oid: obj.oid.toLowerCase(), size: obj.size };
 }
 
-function isObjectRecord(value: unknown): value is LfsBatchObject {
-  return typeof value === 'object' && value !== null && 'oid' in value && 'size' in value;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeOid(value: string): string | null {
+  return OID_RE.test(value) ? value.toLowerCase() : null;
 }
 
 function objectNotFound(obj: LfsBatchObject): object {
@@ -304,6 +314,11 @@ function lfsAuthError(): Response {
 
 function appJson(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body) + '\n', { status, headers: { 'Content-Type': 'application/json' } });
+}
+
+function withRequestId(response: Response, requestId: string): Response {
+  if (response.status >= 500) response.headers.set('X-Request-Id', requestId);
+  return response;
 }
 
 async function requireLfsAccess(request: Request, env: Env, config: AppConfig, needed: UserAccess): Promise<Response | null> {

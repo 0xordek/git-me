@@ -86,6 +86,16 @@ class FakeLfsClient {
 }
 
 describe('migrate', () => {
+  test('rejects invalid concurrency at the migration boundary', async () => {
+    const deps = fakeDeps([], []);
+
+    await expect(migrate({
+      repoPath: '/repo', sourceUrl: 'https://source.example/lfs', sourceHeaders: {}, targetUrl: 'https://target.example/lfs',
+      targetToken: 'target-token', concurrency: 0, dryRun: true, writeConfig: false,
+    }, deps)).rejects.toThrow('invalid concurrency');
+    expect(deps.scanPointers).not.toHaveBeenCalled();
+  });
+
   test('dry-run deduplicates pointer oids without LFS calls or config writes', async () => {
     const oid = 'a'.repeat(64);
     const source = new FakeLfsClient({});
@@ -186,6 +196,21 @@ describe('migrate', () => {
       writeConfig: false,
     }, deps)).resolves.toEqual({ scanned: 1, unique: 1, migrated: 0, skipped: 0, failed: [{ oid: pointerOid, reason: 'hash mismatch' }] });
 
+    expect(target.uploads).toEqual([]);
+  });
+
+  test('rejects a downloaded object whose size disagrees with its pointer', async () => {
+    const bytes = new TextEncoder().encode('different size');
+    const oid = await sha256Hex(bytes);
+    const object = { oid, size: bytes.byteLength + 1 };
+    const source = new FakeLfsClient({ download: [{ objects: [{ ...object, actions: { download: { href: 'https://source/object' } } }] }] }, bytes);
+    const target = new FakeLfsClient({ upload: [{ objects: [{ ...object, actions: { upload: { href: 'https://target/upload' } } }] }] });
+    const deps = fakeDeps([pointer(oid, object.size)], [source, target]);
+
+    await expect(migrate({
+      repoPath: '/repo', sourceUrl: 'https://source.example/lfs', sourceHeaders: {}, targetUrl: 'https://target.example/lfs',
+      targetToken: 'target-token', concurrency: 1, dryRun: false, writeConfig: false,
+    }, deps)).resolves.toMatchObject({ failed: [{ oid, reason: 'download size mismatch' }] });
     expect(target.uploads).toEqual([]);
   });
 

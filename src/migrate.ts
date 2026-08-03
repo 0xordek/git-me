@@ -42,7 +42,10 @@ export type MigrateDeps = {
   setGitConfig?: (repoPath: string, key: string, value: string) => Promise<void>;
 };
 
+type FileDigest = { hex: string; size: number };
+
 export async function migrate(options: MigrateOptions, deps: MigrateDeps = {}): Promise<MigrationResult> {
+  if (!Number.isInteger(options.concurrency) || options.concurrency < 1 || options.concurrency > 16) throw new Error('invalid concurrency');
   const scan = deps.scanPointers ?? scanPointers;
   const createClient = deps.createClient ?? ((clientOptions) => new LfsClient(clientOptions));
   const createTempPath = deps.createTempPath ?? defaultCreateTempPath;
@@ -74,7 +77,9 @@ export async function migrate(options: MigrateOptions, deps: MigrateDeps = {}): 
       const download = await batchAction(source, 'download', object, 'download');
       if (!download) throw new Error('download action missing');
       await source.downloadToFile(download.href, tempPath, download.header);
-      if (await sha256File(tempPath) !== object.oid) throw new Error('hash mismatch');
+      const digest = await sha256File(tempPath);
+      if (digest.hex !== object.oid) throw new Error('hash mismatch');
+      if (digest.size !== object.size) throw new Error('download size mismatch');
 
       const upload = await batchAction(target, 'upload', object, 'upload');
       if (!upload) {
@@ -92,6 +97,7 @@ export async function migrate(options: MigrateOptions, deps: MigrateDeps = {}): 
     }
   });
 
+  result.failed.sort((left, right) => left.oid.localeCompare(right.oid));
   if (options.writeConfig && result.failed.length === 0) await setGitConfig(options.repoPath, 'lfs.url', options.targetUrl);
   return result;
 }
@@ -130,13 +136,17 @@ async function runPool<T>(items: T[], concurrency: number, worker: (item: T) => 
   await Promise.all(workers);
 }
 
-async function sha256File(path: string): Promise<string> {
+async function sha256File(path: string): Promise<FileDigest> {
   const hash = createHash('sha256');
   const stream = createReadStream(path);
+  let size = 0;
   return await new Promise((resolve, reject) => {
-    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('data', (chunk) => {
+      hash.update(chunk);
+      size += chunk.length;
+    });
     stream.on('error', reject);
-    stream.on('end', () => resolve(hash.digest('hex')));
+    stream.on('end', () => resolve({ hex: hash.digest('hex'), size }));
   });
 }
 

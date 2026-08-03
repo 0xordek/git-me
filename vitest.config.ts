@@ -10,6 +10,7 @@ export default defineConfig({
       'test/lfs-client.test.ts',
       'test/migrate.test.ts',
       'test/pointers.test.ts',
+      'test/profile.test.ts',
     ],
   },
 });

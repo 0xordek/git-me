@@ -28,7 +28,10 @@ const LFS_JSON = 'application/vnd.git-lfs+json';
 const ERROR_SNIPPET_BYTES = 200;
 
 export function mergeActionHeaders(base: HeaderMap, actionHeaders?: HeaderMap): HeaderMap {
-  return { ...base, ...(actionHeaders ?? {}) };
+  const result: HeaderMap = {};
+  for (const [name, value] of Object.entries(base)) setHeader(result, name, value);
+  for (const [name, value] of Object.entries(actionHeaders ?? {})) setHeader(result, name, value);
+  return result;
 }
 
 export class LfsClient {
@@ -51,7 +54,9 @@ export class LfsClient {
     });
 
     await throwIfFailed(response, 'LFS batch');
-    return await response.json() as LfsBatchResponse;
+    const body: unknown = await response.json();
+    if (!isBatchResponse(body)) throw new Error('LFS batch response malformed');
+    return body;
   }
 
   async downloadToFile(href: string, filePath: string, headers?: HeaderMap): Promise<void> {
@@ -86,4 +91,27 @@ async function throwIfFailed(response: Response, label: string): Promise<void> {
   if (response.ok) return;
   const body = await response.text().catch(() => '');
   throw new Error(`${label} failed with status ${response.status}: ${body.slice(0, ERROR_SNIPPET_BYTES)}`);
+}
+
+function setHeader(headers: HeaderMap, name: string, value: string): void {
+  const existing = Object.keys(headers).find((key) => key.toLowerCase() === name.toLowerCase());
+  if (existing) delete headers[existing];
+  headers[name] = value;
+}
+
+function isBatchResponse(value: unknown): value is LfsBatchResponse {
+  return isRecord(value)
+    && (value.transfer === undefined || typeof value.transfer === 'string')
+    && Array.isArray(value.objects)
+    && value.objects.every(isBatchObject);
+}
+
+function isBatchObject(value: unknown): value is LfsBatchObject {
+  if (!isRecord(value) || typeof value.oid !== 'string' || typeof value.size !== 'number') return false;
+  if (value.error !== undefined && (!isRecord(value.error) || typeof value.error.code !== 'number' || typeof value.error.message !== 'string')) return false;
+  return true;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

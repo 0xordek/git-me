@@ -55,6 +55,10 @@ describe('mergeActionHeaders', () => {
       Accept: 'application/json',
     });
   });
+
+  test('merges header names case-insensitively', () => {
+    expect(mergeActionHeaders({ authorization: 'Bearer base' }, { Authorization: 'Bearer action' })).toEqual({ Authorization: 'Bearer action' });
+  });
 });
 
 describe('LfsClient.batch', () => {
@@ -87,6 +91,12 @@ describe('LfsClient.batch', () => {
     mockFetch(new Response('server exploded: ' + 'x'.repeat(300), { status: 503 }));
 
     await expect(new LfsClient({ baseUrl: 'https://host' }).batch('upload', objects)).rejects.toThrow(/503.*server exploded/s);
+  });
+
+  test('rejects malformed batch responses', async () => {
+    mockFetch(Response.json({ objects: null }));
+
+    await expect(new LfsClient({ baseUrl: 'https://host' }).batch('upload', objects)).rejects.toThrow('LFS batch response malformed');
   });
 });
 

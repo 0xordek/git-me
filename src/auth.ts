@@ -7,15 +7,15 @@ type AuthResult = { ok: boolean; access?: UserAccess };
 const USER_REGISTRY = 'admin:users';
 
 export async function createUser(env: Env, username: string, password: string, access: UserAccess): Promise<void> {
-  await env.GITME_AUTH.getByName(username).create(username, password, access);
+  return env.GITME_AUTH.getByName(username).create(username, password, access);
 }
 
 export async function deleteUser(env: Env, username: string): Promise<void> {
-  await env.GITME_AUTH.getByName(username).delete(username);
+  return env.GITME_AUTH.getByName(username).delete(username);
 }
 
 export async function authenticateUser(env: Env, username: string, password: string, source: string): Promise<AuthResult> {
-  return await env.GITME_AUTH.getByName(username).authenticate(username, password, source);
+  return env.GITME_AUTH.getByName(username).authenticate(username, password, source);
 }
 
 export async function updateUserIndex(env: Env, username: string, access?: UserAccess): Promise<void> {
@@ -25,5 +25,5 @@ export async function updateUserIndex(env: Env, username: string, access?: UserA
 }
 
 export async function listUsers(env: Env): Promise<IndexedUser[]> {
-  return await env.GITME_AUTH.getByName(USER_REGISTRY).listIndexedUsers();
+  return env.GITME_AUTH.getByName(USER_REGISTRY).listIndexedUsers();
 }

@@ -169,6 +169,31 @@ describe('worker', () => {
     expect(res.status).toBe(500);
     expect(res.headers.get('Content-Type')).toBe('application/vnd.git-lfs+json');
     expect(body).toEqual({ message: 'configuration error' });
+    expect(res.headers.get('X-Request-Id')).toBeTruthy();
+  });
+
+  test('rejects primitive JSON request bodies as client errors', async () => {
+    const e = env();
+    const batch = await worker.fetch(new Request('https://example.com/objects/batch', {
+      method: 'POST', headers: authHeaders({ 'Content-Type': 'application/vnd.git-lfs+json' }), body: 'null',
+    }), e, {} as ExecutionContext);
+    const user = await worker.fetch(new Request('https://example.com/admin/users/alice', {
+      method: 'PUT', headers: authHeaders({ 'Content-Type': 'application/json' }), body: 'null',
+    }), e, {} as ExecutionContext);
+    expect([batch.status, user.status]).toEqual([400, 400]);
+  });
+
+  test('canonicalizes uppercase OIDs to one R2 object', async () => {
+    const e = env();
+    const content = 'uppercase oid';
+    const canonical = await sha256Hex(content);
+    const upload = await worker.fetch(new Request(`https://example.com/objects/${canonical.toUpperCase()}`, {
+      method: 'PUT', headers: authHeaders(), body: content,
+    }), e, {} as ExecutionContext);
+    const download = await worker.fetch(new Request(`https://example.com/objects/${canonical}`, { headers: authHeaders() }), e, {} as ExecutionContext);
+    expect(upload.status).toBe(200);
+    expect(download.status).toBe(200);
+    expect([...e.GITME_R2.objects.keys()]).toEqual([`objects/${canonical}`]);
   });
 
   test('rejects malformed usernames, overlong passwords, and unsafe sizes as client errors', async () => {

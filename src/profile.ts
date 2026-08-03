@@ -31,8 +31,8 @@ class FileProfileStore implements ProfileStore {
 
   async get(name: string): Promise<WorkerProfile | null> {
     const file = await readProfileFile(this.filePath);
-    const profile = file.profiles[name];
-    return profile && profile.name === name ? profile : null;
+    const profile = Object.hasOwn(file.profiles, name) ? file.profiles[name] : undefined;
+    return profile ?? null;
   }
 
   async save(profile: WorkerProfile): Promise<void> {
@@ -48,17 +48,41 @@ class FileProfileStore implements ProfileStore {
 
 async function readProfileFile(filePath: string): Promise<ProfileFile> {
   try {
-    const parsed = JSON.parse(await readFile(filePath, 'utf8')) as Partial<ProfileFile>;
-    if (parsed.version !== 1 || !parsed.profiles || typeof parsed.profiles !== 'object') throw new Error(`invalid profile file: ${filePath}`);
+    const parsed: unknown = JSON.parse(await readFile(filePath, 'utf8'));
+    if (!isRecord(parsed) || parsed.version !== 1 || !isRecord(parsed.profiles)) throw new Error(`invalid profile file: ${filePath}`);
+    const profiles = emptyProfiles();
+    for (const [name, profile] of Object.entries(parsed.profiles)) {
+      if (!isWorkerProfile(profile) || profile.name !== name) throw new Error(`invalid profile file: ${filePath}`);
+      profiles[name] = profile;
+    }
     return {
       version: 1,
-      profiles: parsed.profiles as Record<string, WorkerProfile>,
+      profiles,
     };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, profiles: {} };
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, profiles: emptyProfiles() };
     if (error instanceof SyntaxError) throw new Error(`invalid profile file: ${filePath}`);
     throw error;
   }
+}
+
+function emptyProfiles(): Record<string, WorkerProfile> {
+  return Object.create(null) as Record<string, WorkerProfile>;
+}
+
+function isWorkerProfile(value: unknown): value is WorkerProfile {
+  return isRecord(value)
+    && typeof value.name === 'string'
+    && typeof value.endpoint === 'string'
+    && typeof value.workerName === 'string'
+    && typeof value.createdAt === 'string'
+    && (!('accountId' in value) || typeof value.accountId === 'string')
+    && (!('bucketName' in value) || typeof value.bucketName === 'string')
+    && (!('kvNamespaceId' in value) || typeof value.kvNamespaceId === 'string');
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function profileFilePath(env: Record<string, string | undefined>): string {

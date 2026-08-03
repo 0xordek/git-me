@@ -83,6 +83,17 @@ describe('parsePointer', () => {
   test('returns null for non-integer size', () => {
     expect(parsePointer(pointerText(oid, '1.5'), 'asset.bin')).toBeNull();
   });
+
+  test('accepts valid extension lines', () => {
+    const pointer = [
+      'version https://git-lfs.github.com/spec/v1',
+      'ext-custom value',
+      `oid sha256:${oid}`,
+      'size 123',
+      '',
+    ].join('\n');
+    expect(parsePointer(pointer, 'asset.bin')).toEqual({ path: 'asset.bin', oid: normalizedOid, size: 123 });
+  });
 });
 
 describe('scanPointers', () => {

@@ -26,7 +26,7 @@
     "dist/worker.js"
   ],
   "dependencies": {
-    "wrangler": "^4.110.0"
+    "wrangler": "^4.116.0"
   },
   "scripts": {
     "build": "npm run build:worker",
@@ -45,7 +45,7 @@
     "version:deploy": "wrangler versions deploy --config wrangler.local.toml"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.18.4",
+    "@cloudflare/vitest-pool-workers": "^0.19.1",
     "@cloudflare/workers-types": "^5.20260712.1",
     "@types/node": "^26.1.1",
     "esbuild": "^0.28.1",
