@@ -4,6 +4,9 @@ import worker, { type Env } from '../src/worker';
 import type { R2SigningConfig } from '../src/config';
 
 const oid = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2';
+const directUploadThreshold = 100 * 1024 * 1024;
+const directUploadMaximum = 5 * 1024 * 1024 * 1024;
+const oidChecksum = btoa(String.fromCharCode(...(oid.match(/../g) ?? []).map((byte) => Number.parseInt(byte, 16))));
 
 const signing: R2SigningConfig = {
   accountId: 'test-account',
@@ -13,7 +16,7 @@ const signing: R2SigningConfig = {
 };
 
 class MemoryR2 {
-  readonly objects = new Map<string, { bytes: Uint8Array<ArrayBuffer>; customMetadata?: Record<string, string> }>();
+  readonly objects = new Map<string, { bytes: Uint8Array<ArrayBuffer>; size?: number; customMetadata?: Record<string, string> }>();
   readonly deleteCalls: string[] = [];
   failPut: ((key: string) => boolean) | null = null;
   failDelete = false;
@@ -31,13 +34,17 @@ class MemoryR2 {
   async get(key: string): Promise<{ body: ReadableStream; size: number; customMetadata?: Record<string, string> } | null> {
     const object = this.objects.get(key);
     if (!object) return null;
-    return { body: new Blob([object.bytes]).stream(), size: object.bytes.byteLength, customMetadata: object.customMetadata };
+    return { body: new Blob([object.bytes]).stream(), size: object.size ?? object.bytes.byteLength, customMetadata: object.customMetadata };
   }
 
   async head(key: string): Promise<{ size: number; customMetadata?: Record<string, string> } | null> {
     const object = this.objects.get(key);
     if (!object) return null;
-    return { size: object.bytes.byteLength, customMetadata: object.customMetadata };
+    return { size: object.size ?? object.bytes.byteLength, customMetadata: object.customMetadata };
+  }
+
+  seed(key: string, size: number, customMetadata?: Record<string, string>): void {
+    this.objects.set(key, { bytes: new Uint8Array(), size, customMetadata });
   }
 
   async delete(key: string): Promise<void> {
@@ -224,13 +231,13 @@ describe('worker', () => {
     expect(body.objects[0]!.actions.upload.href).toBe('https://example.com/objects/' + oid);
   });
 
-  test('direct batch upload uses Worker proxy action and repairs unverified objects', async () => {
+  test('direct batch upload uses Worker proxy action at 100 MiB and repairs unverified objects', async () => {
     const e = directEnv();
     await e.GITME_R2.put('objects/' + oid, 'x');
     const req = new Request('https://example.com/objects/batch', {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/vnd.git-lfs+json' }),
-      body: JSON.stringify({ operation: 'upload', transfers: ['basic'], objects: [{ oid, size: 1 }] }),
+      body: JSON.stringify({ operation: 'upload', transfers: ['basic'], objects: [{ oid, size: directUploadThreshold }] }),
     });
 
     const res = await worker.fetch(req, e, {} as ExecutionContext);
@@ -238,6 +245,72 @@ describe('worker', () => {
 
     expect(res.status).toBe(200);
     expect(body.objects[0]!.actions.upload.href).toBe('https://example.com/objects/' + oid);
+  });
+
+  test('direct batch upload binds integrity headers, prevents replacement, and becomes complete', async () => {
+    const e = directEnv();
+    const size = directUploadMaximum;
+    const req = new Request('https://example.com/objects/batch', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/vnd.git-lfs+json' }),
+      body: JSON.stringify({ operation: 'upload', transfers: ['basic'], objects: [{ oid, size }] }),
+    });
+
+    const res = await worker.fetch(req, e, {} as ExecutionContext);
+    const body = await res.json() as { transfer: string; objects: Array<{ actions: { upload: { href: string; header: Record<string, string>; expires_in: number } } }> };
+    const action = body.objects[0]!.actions.upload;
+    const url = new URL(action.href);
+
+    expect(res.status).toBe(200);
+    expect(body.transfer).toBe('basic');
+    expect(url.host).toBe('test-account.r2.cloudflarestorage.com');
+    expect(url.pathname).toBe('/bucket/objects/' + oid);
+    expect(url.searchParams.get('X-Amz-Expires')).toBe('900');
+    expect(url.searchParams.get('X-Amz-Signature')).toMatch(/^[0-9a-f]{64}$/);
+    expect(url.searchParams.get('X-Amz-SignedHeaders')).toBe('host;if-none-match;x-amz-checksum-sha256;x-amz-meta-sha256');
+    expect(action.header).toEqual({
+      'If-None-Match': '*',
+      'x-amz-checksum-sha256': oidChecksum,
+      'x-amz-meta-sha256': oid,
+    });
+    expect(action.expires_in).toBe(900);
+
+    e.GITME_R2.seed('objects/' + oid, size, { sha256: action.header['x-amz-meta-sha256']! });
+    const completed = await worker.fetch(new Request('https://example.com/objects/batch', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/vnd.git-lfs+json' }),
+      body: JSON.stringify({ operation: 'upload', transfers: ['basic'], objects: [{ oid, size }] }),
+    }), e, {} as ExecutionContext);
+    expect((await completed.json() as { objects: unknown[] }).objects[0]).toEqual({ oid, size });
+  });
+
+  test('direct batch upload reports an existing unverified object for admin repair', async () => {
+    const e = directEnv();
+    const size = directUploadThreshold + 1;
+    e.GITME_R2.seed('objects/' + oid, size);
+    const res = await worker.fetch(new Request('https://example.com/objects/batch', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/vnd.git-lfs+json' }),
+      body: JSON.stringify({ operation: 'upload', transfers: ['basic'], objects: [{ oid, size }] }),
+    }), e, {} as ExecutionContext);
+    const object = (await res.json() as { objects: Array<{ error: { code: number; message: string }; actions?: unknown }> }).objects[0]!;
+
+    expect(object.error).toEqual({ code: 409, message: 'object already exists without verified sha256 metadata; admin repair required' });
+    expect(object.actions).toBeUndefined();
+  });
+
+  test('direct batch upload rejects objects above the R2 single-PUT maximum', async () => {
+    const e = directEnv();
+    const size = directUploadMaximum + 1;
+    const res = await worker.fetch(new Request('https://example.com/objects/batch', {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/vnd.git-lfs+json' }),
+      body: JSON.stringify({ operation: 'upload', transfers: ['basic'], objects: [{ oid, size }] }),
+    }), e, {} as ExecutionContext);
+    const object = (await res.json() as { objects: Array<{ error: { code: number; message: string }; actions?: unknown }> }).objects[0]!;
+
+    expect(object.error).toEqual({ code: 413, message: 'object exceeds R2 single-PUT limit of 5 GiB; multipart uploads are not supported' });
+    expect(object.actions).toBeUndefined();
   });
 
   test('batch object existence uses R2, not KV', async () => {
@@ -380,8 +453,12 @@ describe('worker', () => {
   });
 
   test('auth is required', async () => {
-    const e = env();
-    const req = new Request('https://example.com/objects/batch', { method: 'POST' });
+    const e = directEnv();
+    const req = new Request('https://example.com/objects/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/vnd.git-lfs+json' },
+      body: JSON.stringify({ operation: 'upload', transfers: ['basic'], objects: [{ oid, size: directUploadThreshold + 1 }] }),
+    });
 
     const res = await worker.fetch(req, e, {} as ExecutionContext);
     const body = await res.json() as { message: string };
@@ -389,7 +466,7 @@ describe('worker', () => {
     expect(res.status).toBe(401);
     expect(res.headers.get('Content-Type')).toBe('application/vnd.git-lfs+json');
     expect(res.headers.get('WWW-Authenticate')).toBe('Basic realm="git-me", charset="UTF-8"');
-    expect(body.message).toBe('authentication required');
+    expect(body).toEqual({ message: 'authentication required' });
   });
 
   test('rejects bearer tokens with different content and length', async () => {
@@ -442,7 +519,7 @@ describe('worker', () => {
   });
 
   test('read user can download but cannot upload', async () => {
-    const e = env();
+    const e = directEnv();
     await worker.fetch(new Request('https://example.com/admin/users/bob', {
       method: 'PUT',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
@@ -453,7 +530,7 @@ describe('worker', () => {
     const upload = await worker.fetch(new Request('https://example.com/objects/batch', {
       method: 'POST',
       headers: basicHeaders('bob', 'correct horse', { 'Content-Type': 'application/vnd.git-lfs+json' }),
-      body: JSON.stringify({ operation: 'upload', transfers: ['basic'], objects: [{ oid, size: 1 }] }),
+      body: JSON.stringify({ operation: 'upload', transfers: ['basic'], objects: [{ oid, size: directUploadThreshold + 1 }] }),
     }), e, {} as ExecutionContext);
     const download = await worker.fetch(new Request('https://example.com/objects/batch', {
       method: 'POST',
@@ -462,6 +539,7 @@ describe('worker', () => {
     }), e, {} as ExecutionContext);
 
     expect(upload.status).toBe(403);
+    expect(await upload.json()).toEqual({ message: 'forbidden' });
     expect(download.status).toBe(200);
   });
 
@@ -562,6 +640,20 @@ describe('presignR2Url', () => {
     expect(params.get('X-Amz-SignedHeaders')).toBe('host');
     expect(params.get('X-Amz-Content-Sha256')).toBe('UNSIGNED-PAYLOAD');
     expect(params.get('X-Amz-Signature')).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test('binds PUT checksum, metadata, and no-overwrite headers into the signature', async () => {
+    const input = { key: 'objects/' + oid, expiresSeconds: 900, signing, now: new Date('2026-01-02T03:04:05.000Z') };
+    const headers = { 'If-None-Match': '*', 'x-amz-checksum-sha256': oidChecksum, 'x-amz-meta-sha256': oid };
+    const put = new URL(await presignR2Url({ ...input, method: 'PUT', headers }));
+    const changedChecksum = new URL(await presignR2Url({ ...input, method: 'PUT', headers: { ...headers, 'x-amz-checksum-sha256': 'wrong' } }));
+    const changedMetadata = new URL(await presignR2Url({ ...input, method: 'PUT', headers: { ...headers, 'x-amz-meta-sha256': 'b'.repeat(64) } }));
+    const changedCondition = new URL(await presignR2Url({ ...input, method: 'PUT', headers: { ...headers, 'If-None-Match': '"etag"' } }));
+
+    expect(put.pathname).toBe('/bucket/objects/' + oid);
+    expect(put.searchParams.get('X-Amz-Expires')).toBe('900');
+    expect(put.searchParams.get('X-Amz-SignedHeaders')).toBe('host;if-none-match;x-amz-checksum-sha256;x-amz-meta-sha256');
+    expect(new Set([put, changedChecksum, changedMetadata, changedCondition].map((url) => url.searchParams.get('X-Amz-Signature'))).size).toBe(4);
   });
 
   test('encodes object keys by path segment', async () => {

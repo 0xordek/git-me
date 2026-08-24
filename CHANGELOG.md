@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.6.0 - 2026-08-24
+
+- Added short-lived, exact-key R2 `PUT` actions for authorized Git LFS uploads strictly larger than 100 MiB in `direct` mode, with signed SHA-256 checksum, verification metadata, and no-overwrite headers.
+- Kept uploads at or below 100 MiB on the Worker proxy with SHA-256 verification and kept the basic transfer adapter for both paths.
+- Return explicit per-object errors for direct uploads above R2's 5 GiB single-PUT ceiling and for preexisting objects without verified metadata.
+- Documented that direct mode now needs bucket-scoped object read/write credentials; direct large uploads use R2 checksum validation and become complete after valid storage.
+
 ## 0.5.1 - 2026-08-03
 
 - Fixed user creation failing with HTTP 500 on Cloudflare: password records requested 600,000 PBKDF2 iterations, above the 100,000 the Workers runtime accepts. Deployments on 0.3.0–0.5.0 must redeploy and create their users again.

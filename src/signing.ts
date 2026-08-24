@@ -1,10 +1,11 @@
 import type { R2SigningConfig } from './config';
 
 export type PresignR2UrlInput = {
-  method: 'GET';
+  method: 'GET' | 'PUT';
   key: string;
   expiresSeconds: number;
   signing: R2SigningConfig;
+  headers?: Record<string, string>;
   now?: Date;
 };
 
@@ -21,6 +22,15 @@ export async function presignR2Url(input: PresignR2UrlInput): Promise<string> {
   const credentialScope = `${dateStamp}/${REGION}/${SERVICE}/${TERMINATOR}`;
   const host = `${input.signing.accountId}.r2.cloudflarestorage.com`;
   const canonicalUri = `/${encodePathSegment(input.signing.bucketName)}/${encodePath(input.key)}`;
+  const headers = new Map<string, string>([['host', host]]);
+  for (const [name, value] of Object.entries(input.headers ?? {})) {
+    const normalizedName = name.trim().toLowerCase();
+    if (!normalizedName || normalizedName === 'host') throw new Error('invalid signed header');
+    headers.set(normalizedName, value.trim().replace(/\s+/g, ' '));
+  }
+  const canonicalHeaderEntries = [...headers].sort(([a], [b]) => compareAscii(a, b));
+  const canonicalHeaders = canonicalHeaderEntries.map(([name, value]) => `${name}:${value}\n`).join('');
+  const signedHeaders = canonicalHeaderEntries.map(([name]) => name).join(';');
 
   const query: Array<[string, string]> = [
     ['X-Amz-Algorithm', ALGORITHM],
@@ -28,15 +38,15 @@ export async function presignR2Url(input: PresignR2UrlInput): Promise<string> {
     ['X-Amz-Credential', `${input.signing.accessKeyId}/${credentialScope}`],
     ['X-Amz-Date', amzDate],
     ['X-Amz-Expires', String(input.expiresSeconds)],
-    ['X-Amz-SignedHeaders', 'host'],
+    ['X-Amz-SignedHeaders', signedHeaders],
   ];
   const canonicalQuery = canonicalQueryString(query);
   const canonicalRequest = [
     input.method,
     canonicalUri,
     canonicalQuery,
-    `host:${host}\n`,
-    'host',
+    canonicalHeaders,
+    signedHeaders,
     PAYLOAD_HASH,
   ].join('\n');
   const stringToSign = [ALGORITHM, amzDate, credentialScope, await sha256Hex(canonicalRequest)].join('\n');

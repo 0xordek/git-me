@@ -106,26 +106,17 @@ wrangler secret put GITME_AUTH_TOKEN
 ## Transfer Modes
 
 - `proxy`: default mode. The Worker handles Git LFS upload and download bytes through the `PUT /objects/{oid}` and `GET /objects/{oid}` endpoints.
-- `direct`: opt-in download acceleration. Uploads still use the Worker so every object gets SHA-256 verification; downloads receive short-lived signed R2 `GET` URLs.
+- `direct`: objects at or below 100 MiB still upload through the Worker with SHA-256 verification; objects above 100 MiB through 5 GiB receive short-lived signed R2 `PUT` URLs. Verified downloads receive short-lived signed R2 `GET` URLs.
 
-Leave `GITME_TRANSFER_MODE` unset for `proxy`, or set it to `direct` to opt in to signed R2 downloads. Give direct mode a bucket-scoped, read-only R2 S3 API token.
+Leave `GITME_TRANSFER_MODE` unset for `proxy`, or set it to `direct` to enable signed R2 transfers. Give direct mode a bucket-scoped R2 S3 API token with object read/write access.
 
 ## Limits
 
-Uploads pass through the Worker in both transfer modes, so they inherit the Cloudflare 100 MB request-body limit. Cloudflare rejects a larger `PUT /objects/{oid}` at the edge with HTTP 413 before the Worker runs, so nothing appears in Worker logs and `git lfs push` reports the failure without a server-side trace. Downloads have no such limit.
+In `proxy` mode, uploads inherit Cloudflare's request-body limit. In `direct` mode, the normal Git LFS basic transfer sends objects strictly larger than 100 MiB and no larger than 5 GiB directly to their exact `objects/<oid>` R2 key. R2 validates the OID-bound SHA-256 checksum, stores signed `sha256` metadata, and rejects the upload if an object already occupies the key. Objects at or below 100 MiB retain the Worker-verified proxy path. Objects above 5 GiB return an LFS object error because R2 single PUT stops at 5 GiB; multipart upload is not supported. Downloads have no Worker body-size limit.
 
-Until presigned or multipart uploads land, write objects above 100 MB straight to R2 through the S3-compatible endpoint. Verify the local digest against the OID first, because a direct write bypasses the Worker's SHA-256 check:
+After a valid direct upload, later batches recognize the persisted `sha256=<oid>` custom-metadata marker and do not request another upload.
 
-```bash
-sha256sum .git/lfs/objects/<xx>/<yy>/<oid>
-aws s3api put-object \
-  --endpoint-url "https://<account-id>.r2.cloudflarestorage.com" \
-  --bucket <bucket> --key "objects/<oid>" \
-  --body ".git/lfs/objects/<xx>/<yy>/<oid>" \
-  --metadata "sha256=<oid>"
-```
-
-The `sha256=<oid>` user metadata becomes the R2 `customMetadata` marker the Worker writes after a verified proxy upload. Downloads work without it, but an upload batch keeps asking the client to send the object again, and `direct` mode falls back to proxy downloads. `wrangler r2 object put` cannot set custom metadata.
+If `objects/<oid>` already exists without matching verified `sha256` metadata, the upload batch returns a 409 object error instead of an unusable direct action. An administrator must audit the stored bytes and either restore valid metadata or quarantine/remove the conflicting object before the client retries.
 
 A single `AuthUser` Durable Object handles every request for one username and runs PBKDF2 per request. Keep `git config lfs.concurrenttransfers 2` for bulk pushes; the default of 8 can saturate the object and return HTTP 503.
 
@@ -134,12 +125,12 @@ A single `AuthUser` Durable Object handles every request for one username and ru
 | Name | Required | Purpose |
 |------|----------|---------|
 | `GITME_AUTH_TOKEN` | Yes | Admin bearer token for user management and emergency LFS access |
-| `GITME_TRANSFER_MODE` | No | `proxy` by default; set `direct` for signed R2 downloads |
+| `GITME_TRANSFER_MODE` | No | `proxy` by default; set `direct` for signed R2 downloads and uploads above 100 MiB through 5 GiB |
 | `GITME_SIGNED_URL_TTL_SECONDS` | No | Signed URL TTL for `direct` mode; defaults to `900` |
 | `GITME_R2_ACCOUNT_ID` | Direct mode | Cloudflare account id for R2 S3-compatible signing |
-| `GITME_R2_ACCESS_KEY_ID` | Direct mode | Read-only R2 API access key id |
-| `GITME_R2_SECRET_ACCESS_KEY` | Direct mode | Read-only R2 API secret access key |
-| `GITME_R2_BUCKET_NAME` | Direct mode | R2 bucket used in signed download URLs |
+| `GITME_R2_ACCESS_KEY_ID` | Direct mode | Object read/write R2 API access key id |
+| `GITME_R2_SECRET_ACCESS_KEY` | Direct mode | Object read/write R2 API secret access key |
+| `GITME_R2_BUCKET_NAME` | Direct mode | R2 bucket used in signed transfer URLs |
 
 Use Wrangler secrets for sensitive values:
 
@@ -312,7 +303,7 @@ wrangler dev --config wrangler.local.toml
 
 Do not commit auth tokens or R2 API secrets. Use `wrangler secret put GITME_AUTH_TOKEN` and `wrangler secret put GITME_R2_SECRET_ACCESS_KEY`.
 
-`proxy` uploads stream through the Worker and must match their Git LFS SHA-256 OID before becoming readable. `direct` mode only signs R2 downloads; it never signs uploads. Use a bucket-scoped, read-only R2 credential for direct mode.
+Uploads at or below 100 MiB stream through the Worker and must match their Git LFS SHA-256 OID before becoming readable. In `direct` mode, uploads above 100 MiB through 5 GiB use exact-key, short-lived signed R2 `PUT` URLs whose required headers bind the OID checksum and metadata and prevent replacement of an existing object. Use a bucket-scoped Object Read & Write R2 credential without account-wide admin access for direct mode.
 
 Existing deployments upgraded from a release that signed direct uploads must first set `GITME_TRANSFER_MODE=proxy`, audit every `objects/<oid>` object against its SHA-256 filename, and quarantine mismatches. Rotate the old R2 S3 API token before enabling direct downloads again. Objects without the `v0.3` Worker verification marker always fall back to proxy downloads, even when `direct` mode is enabled.
 

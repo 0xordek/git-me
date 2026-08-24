@@ -8,6 +8,8 @@ export { AuthUser } from './auth-do';
 
 const LFS_CONTENT_TYPE = 'application/vnd.git-lfs+json';
 const OBJECT_PREFIX = 'objects/';
+const DIRECT_UPLOAD_THRESHOLD_BYTES = 100 * 1024 * 1024;
+const DIRECT_UPLOAD_MAX_BYTES = 5 * 1024 * 1024 * 1024;
 const OID_RE = /^[0-9a-fA-F]{64}$/;
 const USERNAME_RE = /^[a-z0-9][a-z0-9_.-]{0,62}$/;
 
@@ -132,6 +134,39 @@ async function handleBatch(request: Request, env: Env, config: AppConfig): Promi
       const existing = await env.GITME_R2.head(OBJECT_PREFIX + obj.oid);
       if (existing?.customMetadata?.sha256 === obj.oid) {
         responseObjects.push(existing.size === obj.size ? { oid: obj.oid, size: obj.size } : objectConflict(obj));
+        continue;
+      }
+      if (obj.size > DIRECT_UPLOAD_THRESHOLD_BYTES && config.r2Signing) {
+        if (obj.size > DIRECT_UPLOAD_MAX_BYTES) {
+          responseObjects.push(objectError(obj, 413, 'object exceeds R2 single-PUT limit of 5 GiB; multipart uploads are not supported'));
+          continue;
+        }
+        if (existing) {
+          responseObjects.push(objectError(obj, 409, 'object already exists without verified sha256 metadata; admin repair required'));
+          continue;
+        }
+        const uploadHeaders = {
+          'If-None-Match': '*',
+          'x-amz-checksum-sha256': oidToBase64(obj.oid),
+          'x-amz-meta-sha256': obj.oid,
+        };
+        responseObjects.push({
+          oid: obj.oid,
+          size: obj.size,
+          actions: {
+            upload: {
+              href: await presignR2Url({
+                method: 'PUT',
+                key: OBJECT_PREFIX + obj.oid,
+                expiresSeconds: config.signedUrlTtlSeconds,
+                signing: config.r2Signing,
+                headers: uploadHeaders,
+              }),
+              header: uploadHeaders,
+              expires_in: config.signedUrlTtlSeconds,
+            },
+          },
+        });
         continue;
       }
       responseObjects.push({ oid: obj.oid, size: obj.size, actions: { upload: { href } } });
@@ -290,12 +325,22 @@ function normalizeOid(value: string): string | null {
   return OID_RE.test(value) ? value.toLowerCase() : null;
 }
 
+function oidToBase64(oid: string): string {
+  const bytes = new Uint8Array(oid.length / 2);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = Number.parseInt(oid.slice(i * 2, i * 2 + 2), 16);
+  return btoa(String.fromCharCode(...bytes));
+}
+
 function objectNotFound(obj: LfsBatchObject): object {
   return { oid: obj.oid, size: obj.size, error: { code: 404, message: 'object not found' } };
 }
 
 function objectConflict(obj: LfsBatchObject): object {
   return { oid: obj.oid, size: obj.size, error: { code: 409, message: 'object size mismatch' } };
+}
+
+function objectError(obj: LfsBatchObject, code: number, message: string): object {
+  return { oid: obj.oid, size: obj.size, error: { code, message } };
 }
 
 function json(status: number, body: unknown): Response {

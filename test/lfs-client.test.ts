@@ -150,14 +150,23 @@ describe('LfsClient file transfers', () => {
   test('uploadFromFile omits base auth headers for cross-origin action URLs', async () => {
     const { path } = await createTempFile('upload.bin', 'payload');
     const fetchMock = mockFetch(new Response(null, { status: 200 }));
+    const actionUrl = 'https://storage.example/objects/oid?X-Amz-Signature=signed';
 
-    await new LfsClient({ baseUrl: 'https://lfs.example/repo', headers: { Authorization: 'Bearer base', 'X-Source': 'base' } }).uploadFromFile('https://storage.example/object', path, { Authorization: 'Bearer action', 'X-Action': 'yes' });
+    await new LfsClient({ baseUrl: 'https://lfs.example/repo', headers: { Authorization: 'Bearer base', 'X-Source': 'base' } }).uploadFromFile(actionUrl, path, {
+      'If-None-Match': '*',
+      'x-amz-checksum-sha256': 'checksum',
+      'x-amz-meta-sha256': 'oid',
+    });
 
-    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     const headers = requestHeaders(init);
-    expect(headers.get('Authorization')).toBe('Bearer action');
+    expect(url).toBe(actionUrl);
+    expect(init.method).toBe('PUT');
+    expect(headers.get('Authorization')).toBeNull();
     expect(headers.get('X-Source')).toBeNull();
-    expect(headers.get('X-Action')).toBe('yes');
+    expect(headers.get('If-None-Match')).toBe('*');
+    expect(headers.get('x-amz-checksum-sha256')).toBe('checksum');
+    expect(headers.get('x-amz-meta-sha256')).toBe('oid');
     expect(headers.get('Content-Length')).toBe('7');
   });
 
